@@ -47,6 +47,12 @@ const typeAdvantages = {
 const allTypes = Object.keys(typeAdvantages);
 const apiBase = "https://pokeapi.co/api/v2";
 const battleApiBase = "https://api.pokemonbattle-stage.ru/v2";
+const typeSpriteBase = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/types/generation-viii/brilliant-diamond-shining-pearl";
+const typeIds = { normal: 1, fighting: 2, flying: 3, poison: 4, ground: 5, rock: 6, bug: 7, ghost: 8, steel: 9, fire: 10, water: 11, grass: 12, electric: 13, psychic: 14, ice: 15, dragon: 16, dark: 17, fairy: 18 };
+const generationRanges = { 1: [1, 151], 2: [152, 251], 3: [252, 386], 4: [387, 493], 5: [494, 649] };
+const getGeneration = (id) => Object.entries(generationRanges).find(([, [start, end]]) => id >= start && id <= end)?.[0] || "1";
+const showdownDexSprite = (pokemon) => `https://play.pokemonshowdown.com/sprites/dex/${showdownPokemonName(pokemon)}.png`;
+const fallbackPokemonSprite = (id) => `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${id}.png`;
 const moveTypeNames = { ...typeNames, Dark: "Sombrio" };
 const categoryNames = { physical: "Físico", special: "Especial", status: "Status" };
 const typeChart = {
@@ -124,10 +130,26 @@ const loadMove = async (url) => {
     accuracy: move.accuracy,
     pp: move.pp,
     category: move.damage_class.name,
+    artwork: moveArtworkSymbols[move.type.name] || "✦",
     statChanges: move.stat_changes?.map(({ stat, change }) => ({ stat: stat.name, change })) || [],
     effect: getEffect(move),
   };
 };
+
+function MoveArtwork({ move = {}, small = false }) {
+  const type = move.type || "normal";
+  return <span className={`move-artwork type-${type} ${small ? "small" : ""}`} aria-hidden="true"><img src={`${typeSpriteBase}/${typeIds[type] || 1}.png`} alt="" onError={(event) => { event.currentTarget.style.display = "none"; }} /><span>{move.artwork || moveArtworkSymbols[type] || "✦"}</span></span>;
+}
+
+function TypeSprite({ type, small = false }) {
+  const normalizedType = String(type || "normal").toLowerCase();
+  const label = moveTypeNames[normalizedType] || normalizedType;
+  return <img className={`type-sprite ${small ? "small" : ""}`} src={`${typeSpriteBase}/${typeIds[normalizedType] || 1}.png`} alt={label} title={label} />;
+}
+
+function TypeSprites({ types = [], small = false }) {
+  return <span className="type-sprites">{types.map((type) => <TypeSprite key={type} type={type} small={small} />)}</span>;
+}
 
 const trainerNames = ["Rafael", "Bianca", "Caio", "Lívia", "Diego", "Maya", "Theo", "Helena", "Bruno", "Nina", "Enzo", "Clara"];
 const trainerSprites = ["acetrainer-gen1", "acetrainerf-gen1", "beauty-gen1", "bugcatcher-gen1", "fisher-gen1", "hiker-gen1", "lass-gen1", "schoolboy-gen4", "scientist-gen1", "swimmer-gen1", "youngster-gen1"];
@@ -150,12 +172,13 @@ const loadTrainerSpritePool = async () => {
   }
 };
 const animationSymbols = { fire: "✦", water: "💧", electric: "ϟ", ice: "❄", grass: "✿", psychic: "✧", fighting: "✚", rock: "◆", ground: "◈", flying: "➤", bug: "✹", poison: "☠", ghost: "☾", dragon: "◇", dark: "☽", steel: "⬢", fairy: "✦", normal: "✦" };
+const moveArtworkSymbols = { fire: "🔥", water: "💦", electric: "⚡", ice: "❄️", grass: "🌿", psychic: "🔮", fighting: "🥊", rock: "🪨", ground: "🌋", flying: "🌪️", bug: "🦋", poison: "☠️", ghost: "👻", dragon: "🐉", dark: "🌑", steel: "⚙️", fairy: "✨", normal: "💥" };
 
-const createRandomOpponent = async (name, id, trainerSprite) => {
-  const selectedPokemon = randomItems(pokemonList, 6);
+const createRandomOpponent = async (name, id, trainerSprite, catalog) => {
+  const selectedPokemon = randomItems(catalog, 6);
   const team = await Promise.all(selectedPokemon.map(async (pokemon) => {
     const data = await loadPokemonData(pokemon.id);
-    return { ...pokemon, level: 100, stats: getPokemonStats(data), moves: randomItems(data.moves.filter(({ version_group_details }) => version_group_details.some(({ move_learn_method }) => ["level-up", "machine", "egg", "tutor"].includes(move_learn_method.name))).map(({ move }) => move), 4) };
+    return { ...pokemon, types: data.types.map(({ type }) => type.name.replace(/^./, (letter) => letter.toUpperCase())), level: 100, stats: getPokemonStats(data), moves: randomItems(data.moves.filter(({ version_group_details }) => version_group_details.some(({ move_learn_method }) => ["level-up", "machine", "egg", "tutor"].includes(move_learn_method.name))).map(({ move }) => move), 4) };
   }));
   return { id, name, isUser: false, trainerSprite, team };
 };
@@ -199,25 +222,75 @@ function App() {
   const [showToggles, setShowToggles] = useState(true);
   const [analysis, setAnalysis] = useState(false);
   const [query, setQuery] = useState("");
+  const [pokemonCatalog, setPokemonCatalog] = useState(pokemonList);
+  const [selectedGenerations, setSelectedGenerations] = useState(["1", "2", "3", "4", "5"]);
+  const [showGenerations, setShowGenerations] = useState(false);
   const [movesByPokemon, setMovesByPokemon] = useState({});
   const [chosenMoves, setChosenMoves] = useState({});
+  useEffect(() => {
+    let cancelled = false;
+    const loadCatalog = async () => {
+      try {
+        const response = await fetch(`${apiBase}/pokemon?limit=649`);
+        const { results } = await response.json();
+        const catalog = results.map((entry, index) => {
+          const id = index + 1;
+          const original = pokemonList.find((pokemon) => pokemon.id === id);
+          return original ? { ...original, image: showdownDexSprite({ name: entry.name }) } : { id, name: entry.name, types: [], image: showdownDexSprite({ name: entry.name }) };
+        });
+        if (cancelled) return;
+        setPokemonCatalog(catalog);
+        for (let index = 0; index < catalog.length; index += 20) {
+          const batch = catalog.slice(index, index + 20);
+          const enriched = await Promise.all(batch.map(async (pokemon) => {
+            if (pokemon.types?.length) return pokemon;
+            try {
+              const data = await loadPokemonData(pokemon.id);
+              return { ...pokemon, types: data.types.map(({ type }) => type.name.replace(/^./, (letter) => letter.toUpperCase())) };
+            } catch {
+              return pokemon;
+            }
+          }));
+          if (cancelled) return;
+          setPokemonCatalog((current) => current.map((pokemon) => enriched.find((item) => item.id === pokemon.id) || pokemon));
+        }
+      } catch {
+        if (!cancelled) setPokemonCatalog(pokemonList);
+      }
+    };
+    loadCatalog();
+    return () => { cancelled = true; };
+  }, []);
   const options = useMemo(
     () =>
-      pokemonList.filter((pokemon) =>
-        pokemon.name.toLowerCase().includes(query.toLowerCase()),
+      pokemonCatalog.filter((pokemon) =>
+        selectedGenerations.includes(getGeneration(pokemon.id)) && pokemon.name.toLowerCase().includes(query.toLowerCase()),
       ),
-    [query],
+    [pokemonCatalog, query, selectedGenerations],
   );
-  const toggle = (pokemon) =>
-    setTeam((current) =>
-      current.some((item) => item.id === pokemon.id)
-        ? current.filter((item) => item.id !== pokemon.id)
-        : current.length < 6
-          ? [...current, pokemon]
-          : current,
-    );
-  const randomize = () =>
-    setTeam([...pokemonList].sort(() => Math.random() - 0.5).slice(0, 6));
+  const hydratePokemon = async (pokemon) => {
+    if (pokemon.types?.length) return pokemon;
+    try {
+      const data = await loadPokemonData(pokemon.id);
+      return { ...pokemon, types: data.types.map(({ type }) => type.name.replace(/^./, (letter) => letter.toUpperCase())) };
+    } catch {
+      return pokemon;
+    }
+  };
+  const toggle = async (pokemon) => {
+    if (team.some((item) => item.id === pokemon.id)) {
+      setTeam((current) => current.filter((item) => item.id !== pokemon.id));
+      return;
+    }
+    if (team.length >= 6) return;
+    setTeam((current) => [...current, pokemon]);
+    const hydrated = await hydratePokemon(pokemon);
+    setTeam((current) => current.map((item) => item.id === pokemon.id ? hydrated : item));
+  };
+  const randomize = async () => {
+    const selected = [...options].sort(() => Math.random() - 0.5).slice(0, 6);
+    setTeam(await Promise.all(selected.map(hydratePokemon)));
+  };
 
   return (
     <main className="app-shell">
@@ -262,7 +335,11 @@ function App() {
       <section className="panel options-panel">
         <h2>Opções</h2>
         <button className="filter-button">Filtros</button>
-        <div className="generation">Kanto Pokédex</div>
+        <div className="generation">Gerações I–V · {options.length} Pokémon disponíveis</div>
+        <div className="generation-filter">
+          <button className="generation-button" onClick={() => setShowGenerations((current) => !current)}>Gerações ▾</button>
+          {showGenerations && <div className="generation-menu">{Object.keys(generationRanges).map((generation) => <label key={generation}><input type="checkbox" checked={selectedGenerations.includes(generation)} onChange={() => setSelectedGenerations((current) => current.includes(generation) ? current.filter((item) => item !== generation) : [...current, generation])} /> Geração {generation}</label>)}<small>Você pode misturar gerações na mesma equipe.</small></div>}
+        </div>
         <div className="search-row">
           <input
             value={query}
@@ -278,9 +355,9 @@ function App() {
               onClick={() => toggle(pokemon)}
               title={pokemon.name}
             >
-              <img src={pokemon.image} alt={pokemon.name} />
+              <img src={pokemon.image} alt={pokemon.name} onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = fallbackPokemonSprite(pokemon.id); }} />
               <span>{showToggles ? pokemon.name : ""}</span>
-              <small>{showToggles ? formatTypes(pokemon.types) : ""}</small>
+              <small>{showToggles ? <TypeSprites types={pokemon.types} /> : ""}</small>
             </button>
           ))}
         </div>
@@ -288,7 +365,7 @@ function App() {
       <footer>Pokémon Team Builder · Kanto region</footer>
       </div>
       {page === "moves" && <MovesPage team={team} movesByPokemon={movesByPokemon} setMovesByPokemon={setMovesByPokemon} chosenMoves={chosenMoves} setChosenMoves={setChosenMoves} />}
-      {page === "battles" && <BattlesPage team={team} chosenMoves={chosenMoves} />}
+      {page === "battles" && <BattlesPage team={team} chosenMoves={chosenMoves} pokemonCatalog={pokemonCatalog} />}
       <BottomNav page={page} setPage={setPage} />
     </main>
   );
@@ -356,7 +433,7 @@ function MovesPage({ team, movesByPokemon, setMovesByPokemon, chosenMoves, setCh
   return <section className="subpage"><div className="subpage-heading"><span className="section-label">Preparação</span><h2>Editar movimentos</h2><p>Monte os quatro golpes de cada Pokémon da sua equipe. Os dados vêm da PokéAPI.</p></div>{error && <div className="api-error">{error}</div>}{team.length ? <div className="moves-list">{team.map((pokemon) => <div className="move-card" key={pokemon.id}><img src={pokemon.image} alt={pokemon.name} /><div><h3>{pokemon.name}</h3><small>{formatTypes(pokemon.types)}</small><button className="card-random-button" onClick={() => randomizeMoves(pokemon)} disabled={loadingMove === `${pokemon.id}-random`}>{loadingMove === `${pokemon.id}-random` ? "Sorteando..." : "🎲 Randomizar golpes"}</button></div><div className="move-slots">{Array.from({ length: 4 }, (_, slot) => { const selected = chosenMoves[pokemon.id]?.[slot]; return <div className="move-slot" key={slot}><button className={selected ? "selected-move" : ""} onClick={() => openMovePicker(pokemon, slot)}>{selected ? <><strong>{selected.name.replaceAll("-", " ")}</strong><small>{moveTypeNames[selected.type] || selected.type} · {categoryNames[selected.category]}</small></> : loadingMove === `${pokemon.id}-${slot}` ? "Carregando..." : "Escolher golpe"}</button>{selected && <p className="move-effect">{selected.effect}</p>}{openPokemon === pokemon.id && activeSlot === slot && <div className="move-picker"><input autoFocus value={moveFilter} placeholder="Filtrar golpes..." onChange={(event) => setMoveFilter(event.target.value.toLowerCase())} />{loadingPokemon === pokemon.id ? <span>Buscando golpes...</span> : <>{(movesByPokemon[pokemon.id] || []).filter((move) => move.name.includes(moveFilter)).slice(0, 80).map((move) => <button key={move.name} onClick={() => chooseMove(pokemon, slot, move)}>{move.name.replaceAll("-", " ")}</button>)}<button className="random-move-button" onClick={() => randomizeMoves(pokemon)} disabled={loadingMove === `${pokemon.id}-random`}>{loadingMove === `${pokemon.id}-random` ? "Sorteando..." : "🎲 Randomizar golpes"}</button></>}</div>}</div>; })}</div></div>)}</div> : <EmptyPage text="Adicione Pokémon ao seu time para editar os movimentos." />}</section>;
 }
 
-function BattlesPage({ team, chosenMoves }) {
+function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
   const [tournament, setTournament] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -378,7 +455,7 @@ function BattlesPage({ team, chosenMoves }) {
       }));
       const names = randomItems(trainerNames, 7);
       const availableTrainerSprites = randomItems(await loadTrainerSpritePool(), 8);
-      const opponents = await Promise.all(names.map((name, index) => createRandomOpponent(name, `opponent-${index}`, availableTrainerSprites[index + 1] || trainerSprites[index % trainerSprites.length])));
+      const opponents = await Promise.all(names.map((name, index) => createRandomOpponent(name, `opponent-${index}`, availableTrainerSprites[index + 1] || trainerSprites[index % trainerSprites.length], pokemonCatalog)));
       const trainers = randomItems([{ id: "user", name: "Você", isUser: true, trainerSprite: availableTrainerSprites[0] || trainerSprites[0], team: userTeam }, ...opponents], 8);
       setTournament({ rounds: [createMatches(trainers)], currentRound: 0, champion: null, eliminated: false });
     } catch (requestError) {
@@ -564,7 +641,7 @@ function StatsSummary({ pokemon }) {
 
 function BattleSprite({ pokemon, enemy = false }) {
   const [fallback, setFallback] = useState(false);
-  return <img className={`battle-sprite ${enemy ? "enemy-sprite" : ""}`} src={fallback ? pokemon.image : showdownPokemonSprite(pokemon)} onError={() => setFallback(true)} alt={pokemon.name} />;
+  return <img className={`battle-sprite ${enemy ? "enemy-sprite" : ""}`} src={fallback ? fallbackPokemonSprite(pokemon.id) : showdownPokemonSprite(pokemon)} onError={() => setFallback(true)} alt={pokemon.name} />;
 }
 
 function BattleArena({ battle, onMove, onSwitch }) {
@@ -582,7 +659,7 @@ function BattleArena({ battle, onMove, onSwitch }) {
   useEffect(() => setMenu("main"), [battle.turn]);
   const selectMove = (move) => { setMenu("main"); onMove(move); };
   const selectPokemon = (index) => { setMenu("main"); onSwitch(index); };
-  const renderMoveMenu = () => <div className="classic-move-menu"><div className="move-menu-title">Escolha um golpe</div><div className="classic-move-grid">{playerPokemon.moves.map((move) => <button key={move.id || move.name} onClick={() => selectMove(move)}><strong>{moveLabel(move)}</strong><small>{moveTypeNames[move.type] || move.type} · {categoryNames[move.category]} · PP {move.pp || "—"}</small></button>)}</div><button className="classic-back" onClick={() => setMenu("main")}>VOLTAR</button></div>;
+  const renderMoveMenu = () => <div className="classic-move-menu"><div className="move-menu-title">Escolha um golpe</div><div className="classic-move-grid">{playerPokemon.moves.map((move) => <button key={move.id || move.name} onClick={() => selectMove(move)}><MoveArtwork move={move} /><span className="move-button-copy"><strong>{moveLabel(move)}</strong><small>{moveTypeNames[move.type] || move.type} · {categoryNames[move.category]} · PP {move.pp || "—"}</small></span></button>)}</div><button className="classic-back" onClick={() => setMenu("main")}>VOLTAR</button></div>;
   const renderPokemonMenu = () => <div className="classic-pokemon-menu"><div className="move-menu-title">Escolha um Pokémon</div><div className="classic-pokemon-grid">{battle.player.team.map((pokemon, index) => <button key={pokemon.id} disabled={index === battle.playerIndex || battle.faintedPlayer.includes(index)} onClick={() => selectPokemon(index)}><img src={pokemon.image} alt="" /><span>{pokemon.name}</span><small>{index === battle.playerIndex ? "EM CAMPO" : battle.faintedPlayer.includes(index) ? "DESMAIADO" : "DISPONÍVEL"}</small></button>)}</div><button className="classic-back" onClick={() => setMenu("main")}>VOLTAR</button></div>;
   return <div className="battle-arena"><div className="battle-header"><span>{battle.player.name}</span><strong>VS</strong><span>{battle.enemy.name}</span></div><div className="battle-layout"><div className="battle-left"><div className="battle-field"><div className="battle-side enemy-side"><div className="battle-status"><strong>{enemyPokemon.name}</strong><span>Lv {enemyPokemon.level || 100}</span><span>HP {battle.enemyHp}/{enemyMaxHp}</span><div className="hp-track"><i className={hpState(battle.enemyHp, enemyMaxHp)} style={{ width: hpPercent(battle.enemyHp, enemyMaxHp) }} /></div><BoostDisplay boosts={battle.enemyBoosts[ battle.enemyIndex ]} /></div><BattleSprite pokemon={enemyPokemon} enemy /></div><div className="battle-side player-side"><BattleSprite pokemon={playerPokemon} /><div className="battle-status"><strong>{playerPokemon.name}</strong><span>Lv {playerPokemon.level || 100}</span><span>HP {battle.playerHp}/{playerMaxHp}</span><div className="hp-track"><i className={hpState(battle.playerHp, playerMaxHp)} style={{ width: hpPercent(battle.playerHp, playerMaxHp) }} /></div><BoostDisplay boosts={battle.playerBoosts[ battle.playerIndex ]} /></div></div>{(battle.animations || []).map((animation, index) => <div className={`battle-fx ${animation.side} type-${animation.type}`} style={{ animationDelay: `${index * 380}ms` }} key={animation.id}><span>{animation.symbol}</span></div>)}</div><div className="classic-controls">{menu === "main" && <div className="classic-command"><div className="classic-prompt">O que {playerPokemon.name} fará?</div><button onClick={() => setMenu("fight")}>FIGHT</button><button onClick={() => setMenu("pokemon")}>POKÉMON</button></div>}{menu === "fight" && renderMoveMenu()}{menu === "pokemon" && renderPokemonMenu()}{menu !== "pokemon" && <div className="classic-switch-row"><strong>Switch</strong><div>{battle.player.team.map((pokemon, index) => <button key={pokemon.id} disabled={index === battle.playerIndex || battle.faintedPlayer.includes(index)} onClick={() => selectPokemon(index)}><img src={pokemon.image} alt="" /><span>{pokemon.name}</span></button>)}</div></div>}</div></div><aside className="battle-log-side"><div className="trainer-rail"><div><img src={showdownTrainerSprite(battle.enemy.trainerSprite)} alt="" /><small>{battle.enemy.name}</small></div><div><img src={showdownTrainerSprite(battle.player.trainerSprite)} alt="" /><small>{battle.player.name}</small></div></div><div className="battle-log" ref={logRef}>{battle.log.map((line, index) => <p className={line.startsWith("---") ? "turn-divider" : ""} key={`${line}-${index}`}>{line}</p>)}</div></aside></div></div>;
 }
@@ -605,10 +682,10 @@ function TeamSlot({ pokemon, onClick }) {
     >
       {pokemon ? (
         <>
-          <img src={pokemon.image} alt={pokemon.name} />
+          <img src={pokemon.image} alt={pokemon.name} onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = fallbackPokemonSprite(pokemon.id); }} />
           <span>
             {pokemon.name}
-            <small>{formatTypes(pokemon.types)}</small>
+            <small><TypeSprites types={pokemon.types} /></small>
           </span>
         </>
       ) : (
