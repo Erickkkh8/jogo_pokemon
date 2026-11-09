@@ -32,3 +32,10 @@
 @media (max-width: 650px) { .bottom-nav { bottom: 12px; width: calc(100% - 24px); justify-content: space-around; }.bottom-nav button { min-width: 0; flex: 1; padding: 7px 5px; }.move-card { grid-template-columns: 55px 1fr; }.move-card img { width: 55px; height: 55px; }.move-slots { grid-column: 1 / -1; }.subpage { padding-top: 30px; }.battle-card, .empty-page { padding: 30px 18px; margin-top: 40px; } }
 @media (max-width: 850px) { .defense-grid { grid-template-columns: repeat(6, 1fr); gap: 14px 8px; } }
 @media (max-width: 560px) { .defense-grid { grid-template-columns: repeat(3, 1fr); } .analysis { padding: 14px 8px; } .legend { flex-direction: column; align-items: center; } }
+.battle-fx img { width: 128px; height: 128px; object-fit: contain; image-rendering: pixelated; mix-blend-mode: screen; filter: drop-shadow(0 0 8px #fff8) contrast(1.12) saturate(1.15); }
+.battle-log-side { height: 560px; min-height: 560px; overflow: hidden; }
+.battle-log-side .battle-log { height: 435px; min-height: 0; max-height: 435px; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-gutter: stable; }
+@media (max-width: 760px) {
+  .battle-log-side { height: 300px; min-height: 300px; }
+  .battle-log-side .battle-log { height: 210px; max-height: 210px; }
+}

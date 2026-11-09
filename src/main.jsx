@@ -129,7 +129,9 @@ const loadMove = async (url) => {
     power: move.power,
     accuracy: move.accuracy,
     pp: move.pp,
+    effectChance: move.effect_chance,
     category: move.damage_class.name,
+    target: move.target?.name || "selected-pokemon",
     artwork: moveArtworkSymbols[move.type.name] || "✦",
     statChanges: move.stat_changes?.map(({ stat, change }) => ({ stat: stat.name, change })) || [],
     effect: getEffect(move),
@@ -173,6 +175,10 @@ const loadTrainerSpritePool = async () => {
 };
 const animationSymbols = { fire: "✦", water: "💧", electric: "ϟ", ice: "❄", grass: "✿", psychic: "✧", fighting: "✚", rock: "◆", ground: "◈", flying: "➤", bug: "✹", poison: "☠", ghost: "☾", dragon: "◇", dark: "☽", steel: "⬢", fairy: "✦", normal: "✦" };
 const moveArtworkSymbols = { fire: "🔥", water: "💦", electric: "⚡", ice: "❄️", grass: "🌿", psychic: "🔮", fighting: "🥊", rock: "🪨", ground: "🌋", flying: "🌪️", bug: "🦋", poison: "☠️", ghost: "👻", dragon: "🐉", dark: "🌑", steel: "⚙️", fairy: "✨", normal: "💥" };
+const attackEffectAssets = {
+  fire: "https://img.craftpix.net/2023/11/Free-Flame-Effects-Sprite-Pack.gif",
+  water: "https://img.craftpix.net/2023/11/Free-Water-Effects-Sprite-Pack.gif",
+};
 
 const createRandomOpponent = async (name, id, trainerSprite, catalog) => {
   const selectedPokemon = randomItems(catalog, 6);
@@ -202,11 +208,52 @@ const formatBoostName = (stat) => ({ attack: "Ataque", defense: "Defesa", "speci
 const formatBoosts = (boosts) => Object.entries(boosts || {}).filter(([, value]) => value).map(([stat, value]) => `${formatBoostName(stat)} ${value > 0 ? "+" : ""}${value}`);
 const getAttackBoost = (move, boosts) => move.category === "special" ? getStageMultiplier(boosts["special-attack"]) : getStageMultiplier(boosts.attack);
 const getDefenseBoost = (move, boosts) => move.category === "special" ? getStageMultiplier(boosts["special-defense"]) : getStageMultiplier(boosts.defense);
+const statusLabels = { par: "PAR", brn: "BRN", slp: "SLP", frz: "FRZ", psn: "PSN", tox: "TOX" };
+const statusNames = { par: "paralisado", brn: "queimado", slp: "adormecido", frz: "congelado", psn: "envenenado", tox: "envenenado gravemente" };
+const emptyStatus = () => ({ condition: null, sleepTurns: 0, toxicTurns: 0 });
+const getMoveStatus = (move) => {
+  const text = `${move.name || ""} ${move.effect || ""}`.toLowerCase();
+  if (/paraly|paralis|thunder wave|stun spore/.test(text)) return "par";
+  if (/burn|queim|will-o-wisp/.test(text)) return "brn";
+  if (/sleep|sono|spore|hypnosis|sing/.test(text)) return "slp";
+  if (/freeze|congel|ice beam|blizzard/.test(text) && /freeze|congel/.test(text)) return "frz";
+  if (/badly poison|toxic|tóxic/.test(text)) return "tox";
+  if (/poison|veneno|sludge|toxic/.test(text)) return "psn";
+  return null;
+};
+const moveTargetsSelf = (move) => ["user", "user-or-ally", "users-field", "ally"].includes(move.target);
+const canAct = (status, move) => {
+  if (!status?.condition) return { allowed: true, status };
+  if (status.condition === "par" && Math.random() < 0.25) return { allowed: false, message: "está totalmente paralisado!", status };
+  if (status.condition === "slp") {
+    if (status.sleepTurns <= 0) return { allowed: true, status: { ...status, condition: null }, message: "acordou!" };
+    return { allowed: false, status: { ...status, sleepTurns: status.sleepTurns - 1 }, message: "está dormindo!" };
+  }
+  if (status.condition === "frz") {
+    if (move.type === "fire" || Math.random() < 0.2) return { allowed: true, status: { ...status, condition: null }, message: "descongelou!" };
+    return { allowed: false, status, message: "está congelado!" };
+  }
+  return { allowed: true, status };
+};
+const getResidualDamage = (pokemon, status) => {
+  if (!status?.condition) return 0;
+  const maxHp = getMaxHp(pokemon);
+  if (status.condition === "brn") return Math.max(1, Math.floor(maxHp / 16));
+  if (status.condition === "psn") return Math.max(1, Math.floor(maxHp / 8));
+  if (status.condition === "tox") return Math.max(1, Math.floor(maxHp * Math.max(1, status.toxicTurns || 1) / 16));
+  return 0;
+};
+const applyMoveStatus = (status, move) => {
+  const condition = getMoveStatus(move);
+  if (!condition || status.condition) return status;
+  if (move.effectChance && Math.random() * 100 >= move.effectChance) return status;
+  return { condition, sleepTurns: condition === "slp" ? 1 + Math.floor(Math.random() * 7) : 0, toxicTurns: condition === "tox" ? 1 : 0 };
+};
 const getDamage = (attacker, move, defender, attackerBoosts = {}, defenderBoosts = {}) => {
   if (move.category === "status") return 0;
   const level = attacker.level || 50;
   const power = move.power || 40;
-  const attackStat = getBattleStat(attacker, move.category === "special" ? "special-attack" : "attack");
+  const attackStat = getBattleStat(attacker, move.category === "special" ? "special-attack" : "attack") * (attacker.status?.condition === "brn" && move.category === "physical" ? 0.5 : 1);
   const defenseStat = getBattleStat(defender, move.category === "special" ? "special-defense" : "defense");
   const multiplier = getTypeMultiplier(move.type, defender.types);
   if (multiplier === 0) return 0;
@@ -518,9 +565,12 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
         faintedEnemy: [],
         playerBoosts: { 0: {} },
         enemyBoosts: { 0: {} },
+        playerStatuses: { 0: emptyStatus() },
+        enemyStatuses: { 0: emptyStatus() },
         battleApiSnapshot,
         turn: 0,
         animations: [],
+        resolving: false,
         log: [`${playerPokemon.name} entrou na batalha contra ${enemyPokemon.name}!`],
         finished: false,
       });
@@ -541,73 +591,117 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
   };
 
   const playMove = (move) => {
-    if (!activeBattle || activeBattle.finished) return;
+    if (!activeBattle || activeBattle.finished || activeBattle.resolving) return;
     const playerPokemon = activeBattle.player.team[activeBattle.playerIndex];
     const enemyPokemon = activeBattle.enemy.team[activeBattle.enemyIndex];
+    playerPokemon.status = activeBattle.playerStatuses[activeBattle.playerIndex] || emptyStatus();
+    enemyPokemon.status = activeBattle.enemyStatuses[activeBattle.enemyIndex] || emptyStatus();
     const enemyMove = randomItems(enemyPokemon.moves, 1)[0];
-    const playerSpeed = getBattleStat(playerPokemon, "speed") * getStageMultiplier((activeBattle.playerBoosts[activeBattle.playerIndex] || {}).speed);
-    const enemySpeed = getBattleStat(enemyPokemon, "speed") * getStageMultiplier((activeBattle.enemyBoosts[activeBattle.enemyIndex] || {}).speed);
+    const playerSpeed = getBattleStat(playerPokemon, "speed") * (playerPokemon.status.condition === "par" ? 0.5 : 1) * getStageMultiplier((activeBattle.playerBoosts[activeBattle.playerIndex] || {}).speed);
+    const enemySpeed = getBattleStat(enemyPokemon, "speed") * (enemyPokemon.status.condition === "par" ? 0.5 : 1) * getStageMultiplier((activeBattle.enemyBoosts[activeBattle.enemyIndex] || {}).speed);
     const actions = playerSpeed >= enemySpeed ? [{ side: "player", move }, { side: "enemy", move: enemyMove }] : [{ side: "enemy", move: enemyMove }, { side: "player", move }];
-    let next = { ...activeBattle, turn: (activeBattle.turn || 0) + 1, animations: actions.map((action, index) => ({ id: `${activeBattle.turn}-${index}-${action.move.name}`, side: action.side, type: action.move.type, symbol: animationSymbols[action.move.type] || "✦" })), log: [...activeBattle.log, `--- Turno ${(activeBattle.turn || 0) + 1} ---`], playerBoosts: { ...activeBattle.playerBoosts }, enemyBoosts: { ...activeBattle.enemyBoosts } };
+    let next = { ...activeBattle, turn: (activeBattle.turn || 0) + 1, resolving: true, animations: actions.map((action, index) => ({ id: `${activeBattle.turn}-${index}-${action.move.name}`, side: action.side, type: action.move.type, asset: attackEffectAssets[action.move.type], symbol: animationSymbols[action.move.type] || "✦" })), log: [...activeBattle.log, `--- Turno ${(activeBattle.turn || 0) + 1} ---`], playerBoosts: { ...activeBattle.playerBoosts }, enemyBoosts: { ...activeBattle.enemyBoosts }, playerStatuses: { ...activeBattle.playerStatuses }, enemyStatuses: { ...activeBattle.enemyStatuses } };
 
     for (const action of actions) {
       const attacker = action.side === "player" ? next.player.team[next.playerIndex] : next.enemy.team[next.enemyIndex];
       const defender = action.side === "player" ? next.enemy.team[next.enemyIndex] : next.player.team[next.playerIndex];
       const attackerIndex = action.side === "player" ? next.playerIndex : next.enemyIndex;
+      const statuses = action.side === "player" ? next.playerStatuses : next.enemyStatuses;
+      const statusResult = canAct(statuses[attackerIndex] || emptyStatus(), action.move);
+      statuses[attackerIndex] = statusResult.status;
+      if (statusResult.message) next.log.push(`${attacker.name} ${statusResult.message}`);
+      if (!statusResult.allowed) continue;
       const attackerBoosts = action.side === "player" ? (next.playerBoosts[attackerIndex] || {}) : (next.enemyBoosts[attackerIndex] || {});
       const defenderBoosts = action.side === "player" ? (next.enemyBoosts[next.enemyIndex] || {}) : (next.playerBoosts[next.playerIndex] || {});
       const multiplier = getTypeMultiplier(action.move.type, defender.types);
       const damage = getDamage(attacker, action.move, defender, attackerBoosts, defenderBoosts);
       const prefix = action.side === "player" ? "Você" : "Adversário";
-      const boosts = applyStatChanges(attackerBoosts, action.move.statChanges);
-      if (action.side === "player") next.playerBoosts[attackerIndex] = boosts;
-      else next.enemyBoosts[attackerIndex] = boosts;
-      next.log.push(`${prefix}: ${attacker.name} usou ${moveLabel(action.move)} e causou ${damage} de dano.`);
+      const recipientSide = moveTargetsSelf(action.move) ? action.side : (action.side === "player" ? "enemy" : "player");
+      const recipientIndex = recipientSide === "player" ? next.playerIndex : next.enemyIndex;
+      const recipientBoosts = recipientSide === "player" ? (next.playerBoosts[recipientIndex] || {}) : (next.enemyBoosts[recipientIndex] || {});
+      const boosts = applyStatChanges(recipientBoosts, action.move.statChanges);
+      if (recipientSide === "player") next.playerBoosts[recipientIndex] = boosts;
+      else next.enemyBoosts[recipientIndex] = boosts;
+      next.log.push(`${prefix}: ${attacker.name} usou ${moveLabel(action.move)}${damage ? ` e causou ${damage} de dano.` : "."}`);
       next.log.push(`${getEffectivenessMessage(multiplier)}`);
-      if (action.move.statChanges.length) next.log.push(`${attacker.name}: ${formatBoosts(boosts).join(", ") || "atributos alterados"}.`);
+      if (action.move.statChanges.length) next.log.push(`${recipientSide === action.side ? attacker.name : defender.name}: ${formatBoosts(boosts).join(", ") || "atributos alterados"}.`);
       if (action.side === "player") next.enemyHp = Math.max(0, next.enemyHp - damage);
       else next.playerHp = Math.max(0, next.playerHp - damage);
+      const statusTargetSide = moveTargetsSelf(action.move) ? action.side : (action.side === "player" ? "enemy" : "player");
+      const targetStatuses = statusTargetSide === "player" ? next.playerStatuses : next.enemyStatuses;
+      const targetIndex = statusTargetSide === "player" ? next.playerIndex : next.enemyIndex;
+      const newStatus = applyMoveStatus(targetStatuses[targetIndex] || emptyStatus(), action.move);
+      if (newStatus.condition !== (targetStatuses[targetIndex] || {}).condition) {
+        targetStatuses[targetIndex] = newStatus;
+        next.log.push(`${defender.name} ficou ${statusNames[newStatus.condition]} (${statusLabels[newStatus.condition]}).`);
+      }
       const targetHp = action.side === "player" ? next.enemyHp : next.playerHp;
       if (targetHp === 0) {
         const targetIsEnemy = action.side === "player";
         next.log.push(`${defender.name} desmaiou!`);
         const fainted = targetIsEnemy ? [...next.faintedEnemy, next.enemyIndex] : [...next.faintedPlayer, next.playerIndex];
         const targetTeam = targetIsEnemy ? next.enemy.team : next.player.team;
+        next.pendingReplacement = { side: targetIsEnemy ? "enemy" : "player", fainted };
+        if (targetIsEnemy) next.faintedEnemy = fainted;
+        else next.faintedPlayer = fainted;
+        break;
+      }
+    }
+    if (!next.pendingReplacement) {
+      for (const side of ["player", "enemy"]) {
+        const index = side === "player" ? next.playerIndex : next.enemyIndex;
+        const pokemon = side === "player" ? next.player.team[index] : next.enemy.team[index];
+        const statuses = side === "player" ? next.playerStatuses : next.enemyStatuses;
+        const currentStatus = statuses[index] || emptyStatus();
+        const residual = getResidualDamage(pokemon, currentStatus);
+        if (residual) {
+          if (side === "player") next.playerHp = Math.max(0, next.playerHp - residual);
+          else next.enemyHp = Math.max(0, next.enemyHp - residual);
+          next.log.push(`${pokemon.name} sofreu ${residual} de dano por ${statusNames[currentStatus.condition]}.`);
+          if (currentStatus.condition === "tox") statuses[index] = { ...currentStatus, toxicTurns: (currentStatus.toxicTurns || 1) + 1 };
+          if ((side === "player" ? next.playerHp : next.enemyHp) === 0) {
+            next.log.push(`${pokemon.name} desmaiou!`);
+            const fainted = side === "player" ? [...next.faintedPlayer, index] : [...next.faintedEnemy, index];
+            if (side === "player") next.faintedPlayer = fainted;
+            else next.faintedEnemy = fainted;
+            next.pendingReplacement = { side, fainted };
+            break;
+          }
+        }
+      }
+    }
+    setActiveBattle(next);
+    window.setTimeout(() => {
+      if (next.pendingReplacement) {
+        const { side, fainted } = next.pendingReplacement;
+        const targetTeam = side === "enemy" ? next.enemy.team : next.player.team;
         if (fainted.length === targetTeam.length) {
-          finishBattle(targetIsEnemy ? next.player : next.enemy);
+          finishBattle(side === "enemy" ? next.player : next.enemy);
           return;
         }
         const nextIndex = getNextAvailableIndex(targetTeam, fainted);
         const nextPokemon = targetTeam[nextIndex];
-        if (targetIsEnemy) {
-          next.enemyIndex = nextIndex;
-          next.enemyHp = getMaxHp(nextPokemon);
-          next.faintedEnemy = fainted;
-          next.enemyBoosts[nextIndex] = {};
-        } else {
-          next.playerIndex = nextIndex;
-          next.playerHp = getMaxHp(nextPokemon);
-          next.faintedPlayer = fainted;
-          next.playerBoosts[nextIndex] = {};
-        }
-        next.log.push(`${nextPokemon.name} entrou na batalha!`);
-        break;
+        setActiveBattle((current) => ({ ...current, resolving: false, pendingReplacement: null, ...(side === "enemy" ? { enemyIndex: nextIndex, enemyHp: getMaxHp(nextPokemon), enemyBoosts: { ...current.enemyBoosts, [nextIndex]: {} }, enemyStatuses: { ...current.enemyStatuses, [nextIndex]: emptyStatus() } } : { playerIndex: nextIndex, playerHp: getMaxHp(nextPokemon), playerBoosts: { ...current.playerBoosts, [nextIndex]: {} }, playerStatuses: { ...current.playerStatuses, [nextIndex]: emptyStatus() } }), log: [...current.log, `${nextPokemon.name} entrou na batalha!`] }));
+        return;
       }
-    }
-    setActiveBattle(next);
+      setActiveBattle((current) => current ? { ...current, resolving: false } : current);
+    }, 900);
   };
 
   const switchPokemon = (nextIndex) => {
-    if (!activeBattle || nextIndex === activeBattle.playerIndex || activeBattle.faintedPlayer.includes(nextIndex)) return;
+    if (!activeBattle || activeBattle.resolving || nextIndex === activeBattle.playerIndex || activeBattle.faintedPlayer.includes(nextIndex)) return;
     const nextPokemon = activeBattle.player.team[nextIndex];
     const enemyPokemon = activeBattle.enemy.team[activeBattle.enemyIndex];
+    nextPokemon.status = activeBattle.playerStatuses[nextIndex] || emptyStatus();
+    enemyPokemon.status = activeBattle.enemyStatuses[activeBattle.enemyIndex] || emptyStatus();
     const enemyMove = randomItems(enemyPokemon.moves, 1)[0];
     const enemyBoost = activeBattle.enemyBoosts[activeBattle.enemyIndex] || {};
     const damage = getDamage(enemyPokemon, enemyMove, nextPokemon, enemyBoost, activeBattle.playerBoosts[nextIndex] || {});
     const playerHp = Math.max(0, getMaxHp(nextPokemon) - damage);
     const enemyBoosts = { ...activeBattle.enemyBoosts, [activeBattle.enemyIndex]: applyStatChanges(enemyBoost, enemyMove.statChanges) };
+    const playerStatuses = { ...activeBattle.playerStatuses, [nextIndex]: applyMoveStatus(activeBattle.playerStatuses[nextIndex] || emptyStatus(), enemyMove) };
     const log = [...activeBattle.log, `--- Turno ${(activeBattle.turn || 0) + 1} ---`, `Você trocou para ${nextPokemon.name}.`, `Adversário: ${enemyPokemon.name} usou ${moveLabel(enemyMove)} e causou ${damage} de dano.`, getEffectivenessMessage(getTypeMultiplier(enemyMove.type, nextPokemon.types))];
-    const animations = [{ id: `${activeBattle.turn}-switch-${enemyMove.name}`, side: "enemy", type: enemyMove.type, symbol: animationSymbols[enemyMove.type] || "✦" }];
+    const animations = [{ id: `${activeBattle.turn}-switch-${enemyMove.name}`, side: "enemy", type: enemyMove.type, asset: attackEffectAssets[enemyMove.type], symbol: animationSymbols[enemyMove.type] || "✦" }];
     if (enemyMove.statChanges.length) log.push(`${enemyPokemon.name}: ${formatBoosts(enemyBoosts[activeBattle.enemyIndex]).join(", ") || "atributos alterados"}.`);
     if (playerHp === 0) {
       const faintedPlayer = [...activeBattle.faintedPlayer, nextIndex];
@@ -618,10 +712,10 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
       }
       const fallbackIndex = getNextAvailableIndex(activeBattle.player.team, faintedPlayer);
       const fallbackPokemon = activeBattle.player.team[fallbackIndex];
-      setActiveBattle({ ...activeBattle, turn: (activeBattle.turn || 0) + 1, animations, playerIndex: fallbackIndex, playerHp: getMaxHp(fallbackPokemon), faintedPlayer, enemyBoosts, log: [...log, `${fallbackPokemon.name} entrou na batalha!`] });
+      setActiveBattle({ ...activeBattle, turn: (activeBattle.turn || 0) + 1, animations, playerIndex: fallbackIndex, playerHp: getMaxHp(fallbackPokemon), faintedPlayer, enemyBoosts, playerStatuses, log: [...log, `${fallbackPokemon.name} entrou na batalha!`] });
       return;
     }
-    setActiveBattle({ ...activeBattle, turn: (activeBattle.turn || 0) + 1, animations, playerIndex: nextIndex, playerHp, enemyBoosts, log });
+    setActiveBattle({ ...activeBattle, turn: (activeBattle.turn || 0) + 1, animations, playerIndex: nextIndex, playerHp, enemyBoosts, playerStatuses, log });
   };
 
   const roundNames = ["Quartas de final", "Semifinais", "Grande final"];
@@ -632,6 +726,17 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
 function BoostDisplay({ boosts }) {
   const activeBoosts = formatBoosts(boosts);
   return activeBoosts.length ? <div className="boost-display">{activeBoosts.map((boost) => <span key={boost}>{boost}</span>)}</div> : null;
+}
+
+function StatusDisplay({ status }) {
+  if (!status?.condition) return null;
+  return <span className={`battle-condition condition-${status.condition}`}>{statusLabels[status.condition]}</span>;
+}
+
+function TeamIndicators({ team, fainted, current }) {
+  return <div className="team-indicators" aria-label={`${team.length - fainted.length} Pokémon restantes`}>
+    {team.map((pokemon, index) => <span className={`${fainted.includes(index) ? "defeated" : ""} ${current === index ? "active" : ""}`} key={`${pokemon.id}-${index}`} title={fainted.includes(index) ? `${pokemon.name} derrotado` : pokemon.name}>●</span>)}
+  </div>;
 }
 
 function StatsSummary({ pokemon }) {
@@ -661,7 +766,7 @@ function BattleArena({ battle, onMove, onSwitch }) {
   const selectPokemon = (index) => { setMenu("main"); onSwitch(index); };
   const renderMoveMenu = () => <div className="classic-move-menu"><div className="move-menu-title">Escolha um golpe</div><div className="classic-move-grid">{playerPokemon.moves.map((move) => <button key={move.id || move.name} onClick={() => selectMove(move)}><MoveArtwork move={move} /><span className="move-button-copy"><strong>{moveLabel(move)}</strong><small>{moveTypeNames[move.type] || move.type} · {categoryNames[move.category]} · PP {move.pp || "—"}</small></span></button>)}</div><button className="classic-back" onClick={() => setMenu("main")}>VOLTAR</button></div>;
   const renderPokemonMenu = () => <div className="classic-pokemon-menu"><div className="move-menu-title">Escolha um Pokémon</div><div className="classic-pokemon-grid">{battle.player.team.map((pokemon, index) => <button key={pokemon.id} disabled={index === battle.playerIndex || battle.faintedPlayer.includes(index)} onClick={() => selectPokemon(index)}><img src={pokemon.image} alt="" /><span>{pokemon.name}</span><small>{index === battle.playerIndex ? "EM CAMPO" : battle.faintedPlayer.includes(index) ? "DESMAIADO" : "DISPONÍVEL"}</small></button>)}</div><button className="classic-back" onClick={() => setMenu("main")}>VOLTAR</button></div>;
-  return <div className="battle-arena"><div className="battle-header"><span>{battle.player.name}</span><strong>VS</strong><span>{battle.enemy.name}</span></div><div className="battle-layout"><div className="battle-left"><div className="battle-field"><div className="battle-side enemy-side"><div className="battle-status"><strong>{enemyPokemon.name}</strong><span>Lv {enemyPokemon.level || 100}</span><span>HP {battle.enemyHp}/{enemyMaxHp}</span><div className="hp-track"><i className={hpState(battle.enemyHp, enemyMaxHp)} style={{ width: hpPercent(battle.enemyHp, enemyMaxHp) }} /></div><BoostDisplay boosts={battle.enemyBoosts[ battle.enemyIndex ]} /></div><BattleSprite pokemon={enemyPokemon} enemy /></div><div className="battle-side player-side"><BattleSprite pokemon={playerPokemon} /><div className="battle-status"><strong>{playerPokemon.name}</strong><span>Lv {playerPokemon.level || 100}</span><span>HP {battle.playerHp}/{playerMaxHp}</span><div className="hp-track"><i className={hpState(battle.playerHp, playerMaxHp)} style={{ width: hpPercent(battle.playerHp, playerMaxHp) }} /></div><BoostDisplay boosts={battle.playerBoosts[ battle.playerIndex ]} /></div></div>{(battle.animations || []).map((animation, index) => <div className={`battle-fx ${animation.side} type-${animation.type}`} style={{ animationDelay: `${index * 380}ms` }} key={animation.id}><span>{animation.symbol}</span></div>)}</div><div className="classic-controls">{menu === "main" && <div className="classic-command"><div className="classic-prompt">O que {playerPokemon.name} fará?</div><button onClick={() => setMenu("fight")}>FIGHT</button><button onClick={() => setMenu("pokemon")}>POKÉMON</button></div>}{menu === "fight" && renderMoveMenu()}{menu === "pokemon" && renderPokemonMenu()}{menu !== "pokemon" && <div className="classic-switch-row"><strong>Switch</strong><div>{battle.player.team.map((pokemon, index) => <button key={pokemon.id} disabled={index === battle.playerIndex || battle.faintedPlayer.includes(index)} onClick={() => selectPokemon(index)}><img src={pokemon.image} alt="" /><span>{pokemon.name}</span></button>)}</div></div>}</div></div><aside className="battle-log-side"><div className="trainer-rail"><div><img src={showdownTrainerSprite(battle.enemy.trainerSprite)} alt="" /><small>{battle.enemy.name}</small></div><div><img src={showdownTrainerSprite(battle.player.trainerSprite)} alt="" /><small>{battle.player.name}</small></div></div><div className="battle-log" ref={logRef}>{battle.log.map((line, index) => <p className={line.startsWith("---") ? "turn-divider" : ""} key={`${line}-${index}`}>{line}</p>)}</div></aside></div></div>;
+  return <div className="battle-arena"><div className="battle-header"><span>{battle.player.name}<TeamIndicators team={battle.player.team} fainted={battle.faintedPlayer} current={battle.playerIndex} /></span><strong>VS</strong><span><TeamIndicators team={battle.enemy.team} fainted={battle.faintedEnemy} current={battle.enemyIndex} />{battle.enemy.name}</span></div><div className="battle-layout"><div className="battle-left"><div className="battle-field"><div className={`battle-side enemy-side ${battle.pendingReplacement?.side === "enemy" ? "fainted-side" : ""}`}><div className="battle-status"><strong>{enemyPokemon.name}</strong><StatusDisplay status={battle.enemyStatuses[ battle.enemyIndex ]} /><span>Lv {enemyPokemon.level || 100}</span><span>HP {battle.enemyHp}/{enemyMaxHp}</span><div className="hp-track"><i className={hpState(battle.enemyHp, enemyMaxHp)} style={{ width: hpPercent(battle.enemyHp, enemyMaxHp) }} /></div><BoostDisplay boosts={battle.enemyBoosts[ battle.enemyIndex ]} /></div><BattleSprite pokemon={enemyPokemon} enemy /></div><div className={`battle-side player-side ${battle.pendingReplacement?.side === "player" ? "fainted-side" : ""}`}><BattleSprite pokemon={playerPokemon} /><div className="battle-status"><strong>{playerPokemon.name}</strong><StatusDisplay status={battle.playerStatuses[ battle.playerIndex ]} /><span>Lv {playerPokemon.level || 100}</span><span>HP {battle.playerHp}/{playerMaxHp}</span><div className="hp-track"><i className={hpState(battle.playerHp, playerMaxHp)} style={{ width: hpPercent(battle.playerHp, playerMaxHp) }} /></div><BoostDisplay boosts={battle.playerBoosts[ battle.playerIndex ]} /></div></div>{(battle.animations || []).map((animation, index) => <div className={`battle-fx ${animation.side} type-${animation.type}`} style={{ animationDelay: `${index * 380}ms` }} key={animation.id}>{animation.asset ? <img src={animation.asset} alt="" /> : <span>{animation.symbol}</span>}</div>)}</div><div className="classic-controls">{menu === "main" && <div className="classic-command"><div className="classic-prompt">{battle.resolving ? "Aguarde o resultado..." : `O que ${playerPokemon.name} fará?`}</div><button disabled={battle.resolving} onClick={() => setMenu("fight")}>FIGHT</button><button disabled={battle.resolving} onClick={() => setMenu("pokemon")}>POKÉMON</button></div>}{menu === "fight" && renderMoveMenu()}{menu === "pokemon" && renderPokemonMenu()}{menu !== "pokemon" && <div className="classic-switch-row"><strong>Switch</strong><div>{battle.player.team.map((pokemon, index) => <button key={pokemon.id} disabled={battle.resolving || index === battle.playerIndex || battle.faintedPlayer.includes(index)} onClick={() => selectPokemon(index)}><img src={pokemon.image} alt="" /><span>{pokemon.name}</span></button>)}</div></div>}</div></div><aside className="battle-log-side"><div className="trainer-rail"><div><img src={showdownTrainerSprite(battle.enemy.trainerSprite)} alt="" /><small>{battle.enemy.name}</small></div><div><img src={showdownTrainerSprite(battle.player.trainerSprite)} alt="" /><small>{battle.player.name}</small></div></div><div className="battle-log" ref={logRef}>{battle.log.map((line, index) => <p className={line.startsWith("---") ? "turn-divider" : ""} key={`${line}-${index}`}>{line}</p>)}</div></aside></div></div>;
 }
 
 function TournamentMatch({ match, onBattle }) {
