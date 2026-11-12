@@ -49,9 +49,18 @@ const apiBase = "https://pokeapi.co/api/v2";
 const battleApiBase = "https://api.pokemonbattle-stage.ru/v2";
 const typeSpriteBase = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/types/generation-viii/brilliant-diamond-shining-pearl";
 const typeIds = { normal: 1, fighting: 2, flying: 3, poison: 4, ground: 5, rock: 6, bug: 7, ghost: 8, steel: 9, fire: 10, water: 11, grass: 12, electric: 13, psychic: 14, ice: 15, dragon: 16, dark: 17, fairy: 18 };
-const generationRanges = { 1: [1, 151], 2: [152, 251], 3: [252, 386], 4: [387, 493], 5: [494, 649] };
+const generationRanges = { 1: [1, 151], 2: [152, 251], 3: [252, 386], 4: [387, 493], 5: [494, 649], 6: [650, 721], 7: [722, 809], 8: [810, 905], 9: [906, 1025] };
 const getGeneration = (id) => Object.entries(generationRanges).find(([, [start, end]]) => id >= start && id <= end)?.[0] || "1";
-const showdownDexSprite = (pokemon) => `https://play.pokemonshowdown.com/sprites/dex/${showdownPokemonName(pokemon)}.png`;
+const isExcludedForm = (name) => /(^|-)g(?:max|igantamax)(-|$)|(^|-)eternamax(-|$)/i.test(name);
+const specialPokemonArtwork = {
+  koraidon: "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/1007.png",
+  miraidon: "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/1008.png",
+};
+const getSpecialPokemonArtwork = (name) => specialPokemonArtwork[name] || (name.startsWith("koraidon-") ? specialPokemonArtwork.koraidon : name.startsWith("miraidon-") ? specialPokemonArtwork.miraidon : null);
+const showdownDexSprite = (pokemon) => {
+  const name = showdownPokemonName(pokemon);
+  return getSpecialPokemonArtwork(name) || `https://play.pokemonshowdown.com/sprites/dex/${name}.png`;
+};
 const fallbackPokemonSprite = (id) => `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${id}.png`;
 const moveTypeNames = { ...typeNames, Dark: "Sombrio" };
 const categoryNames = { physical: "Físico", special: "Especial", status: "Status" };
@@ -84,6 +93,7 @@ const getEffect = (move) => {
 };
 
 const pokemonDataCache = new Map();
+const evolutionChainCache = new Map();
 const loadPokemonData = async (pokemonId) => {
   if (!pokemonDataCache.has(pokemonId)) {
     pokemonDataCache.set(pokemonId, fetch(`${apiBase}/pokemon/${pokemonId}`).then((response) => {
@@ -92,6 +102,24 @@ const loadPokemonData = async (pokemonId) => {
     }));
   }
   return pokemonDataCache.get(pokemonId);
+};
+const getEvolutionLeaves = (chainNode, leaves = new Set()) => {
+  if (!chainNode?.evolves_to?.length) leaves.add(chainNode.species.name.toLowerCase());
+  chainNode?.evolves_to?.forEach((next) => getEvolutionLeaves(next, leaves));
+  return leaves;
+};
+const isFinalEvolution = async (pokemon) => {
+  const data = await loadPokemonData(pokemon.id);
+  const speciesResponse = await fetch(data.species.url);
+  if (!speciesResponse.ok) return true;
+  const species = await speciesResponse.json();
+  const chainUrl = species.evolution_chain?.url;
+  if (!chainUrl) return true;
+  if (!evolutionChainCache.has(chainUrl)) {
+    evolutionChainCache.set(chainUrl, fetch(chainUrl).then((response) => response.json()).then(({ chain }) => getEvolutionLeaves(chain)));
+  }
+  const finalNames = await evolutionChainCache.get(chainUrl);
+  return finalNames.has(pokemon.name.toLowerCase());
 };
 
 const loadBattleApiSnapshot = async () => {
@@ -153,12 +181,27 @@ function TypeSprites({ types = [], small = false }) {
   return <span className="type-sprites">{types.map((type) => <TypeSprite key={type} type={type} small={small} />)}</span>;
 }
 
+function PokemonImage({ pokemon, className = "", alt = "" }) {
+  const sources = [...new Set([pokemon.image, getSpecialPokemonArtwork(showdownPokemonName(pokemon)), fallbackPokemonSprite(pokemon.id), `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/${pokemon.id}.png`, pokemon.baseId && fallbackPokemonSprite(pokemon.baseId)].filter(Boolean))];
+  const [sourceIndex, setSourceIndex] = useState(0);
+  useEffect(() => setSourceIndex(0), [pokemon.id, pokemon.image]);
+  return <img className={className} src={sources[sourceIndex]} alt={alt || pokemon.name} onError={() => setSourceIndex((current) => Math.min(current + 1, sources.length - 1))} />;
+}
+
 const trainerNames = ["Rafael", "Bianca", "Caio", "Lívia", "Diego", "Maya", "Theo", "Helena", "Bruno", "Nina", "Enzo", "Clara"];
 const trainerSprites = ["acetrainer-gen1", "acetrainerf-gen1", "beauty-gen1", "bugcatcher-gen1", "fisher-gen1", "hiker-gen1", "lass-gen1", "schoolboy-gen4", "scientist-gen1", "swimmer-gen1", "youngster-gen1"];
 const randomItems = (items, amount) => [...items].sort(() => Math.random() - 0.5).slice(0, amount);
 const moveLabel = (move) => move.name.replaceAll("-", " ");
 const showdownPokemonName = (pokemon) => pokemon.name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace("♀", "-f").replace("♂", "-m").replace(/[’.' ]/g, "").replace("mr-mime", "mr-mime");
-const showdownPokemonSprite = (pokemon) => `https://play.pokemonshowdown.com/sprites/ani/${showdownPokemonName(pokemon)}.gif`;
+const getCorrectedPokemonTypes = (pokemon, types = []) => {
+  const name = String(pokemon?.name || "").toLowerCase();
+  if (/^dragonite(?:-mega(?:-[xy])?)?$/.test(name)) return ["Dragon", "Flying"];
+  return types;
+};
+const showdownPokemonSprite = (pokemon) => {
+  const name = showdownPokemonName(pokemon);
+  return getSpecialPokemonArtwork(name) || `https://play.pokemonshowdown.com/sprites/ani/${name}.gif`;
+};
 const showdownTrainerSprite = (name) => `https://play.pokemonshowdown.com/sprites/trainers/${name}.png`;
 const loadTrainerSpritePool = async () => {
   try {
@@ -184,7 +227,7 @@ const createRandomOpponent = async (name, id, trainerSprite, catalog) => {
   const selectedPokemon = randomItems(catalog, 6);
   const team = await Promise.all(selectedPokemon.map(async (pokemon) => {
     const data = await loadPokemonData(pokemon.id);
-    return { ...pokemon, types: data.types.map(({ type }) => type.name.replace(/^./, (letter) => letter.toUpperCase())), level: 100, stats: getPokemonStats(data), moves: randomItems(data.moves.filter(({ version_group_details }) => version_group_details.some(({ move_learn_method }) => ["level-up", "machine", "egg", "tutor"].includes(move_learn_method.name))).map(({ move }) => move), 4) };
+    return { ...pokemon, types: getCorrectedPokemonTypes(pokemon, data.types.map(({ type }) => type.name.replace(/^./, (letter) => letter.toUpperCase()))), level: 100, stats: getPokemonStats(data), moves: randomItems(data.moves.filter(({ version_group_details }) => version_group_details.some(({ move_learn_method }) => ["level-up", "machine", "egg", "tutor"].includes(move_learn_method.name))).map(({ move }) => move), 4) };
   }));
   return { id, name, isUser: false, trainerSprite, team };
 };
@@ -270,20 +313,33 @@ function App() {
   const [analysis, setAnalysis] = useState(false);
   const [query, setQuery] = useState("");
   const [pokemonCatalog, setPokemonCatalog] = useState(pokemonList);
-  const [selectedGenerations, setSelectedGenerations] = useState(["1", "2", "3", "4", "5"]);
+  const [selectedGenerations, setSelectedGenerations] = useState([]);
   const [showGenerations, setShowGenerations] = useState(false);
+  const [selectedTypes, setSelectedTypes] = useState([]);
+  const [showTypes, setShowTypes] = useState(false);
   const [movesByPokemon, setMovesByPokemon] = useState({});
   const [chosenMoves, setChosenMoves] = useState({});
+  const [libraryView, setLibraryView] = useState(null);
+  const [savedTeams, setSavedTeams] = useState(() => JSON.parse(localStorage.getItem("pokemon-saved-teams") || "[]"));
+  const [box, setBox] = useState(() => JSON.parse(localStorage.getItem("pokemon-box") || "[]"));
+  useEffect(() => localStorage.setItem("pokemon-saved-teams", JSON.stringify(savedTeams)), [savedTeams]);
+  useEffect(() => localStorage.setItem("pokemon-box", JSON.stringify(box)), [box]);
   useEffect(() => {
     let cancelled = false;
     const loadCatalog = async () => {
       try {
-        const response = await fetch(`${apiBase}/pokemon?limit=649`);
+        const response = await fetch(`${apiBase}/pokemon?limit=2000`);
         const { results } = await response.json();
-        const catalog = results.map((entry, index) => {
-          const id = index + 1;
-          const original = pokemonList.find((pokemon) => pokemon.id === id);
-          return original ? { ...original, image: showdownDexSprite({ name: entry.name }) } : { id, name: entry.name, types: [], image: showdownDexSprite({ name: entry.name }) };
+        const entries = results.map((entry) => ({ ...entry, id: Number(entry.url.match(/\/pokemon\/(\d+)\/$/)?.[1] || 0) })).filter((entry) => entry.id && !isExcludedForm(entry.name));
+        const baseEntries = entries.filter((entry) => entry.id <= 1025);
+        const baseNames = baseEntries.map((entry) => entry.name).sort((a, b) => b.length - a.length);
+        const catalog = entries.map((entry) => {
+          const baseName = baseNames.find((name) => entry.name === name || entry.name.startsWith(`${name}-`));
+          const baseEntry = baseEntries.find((item) => item.name === baseName);
+          const baseId = baseEntry?.id || entry.id;
+          const original = pokemonList.find((pokemon) => pokemon.id === baseId);
+          const types = getCorrectedPokemonTypes({ name: entry.name }, original?.types || []);
+          return original ? { ...original, id: entry.id, name: entry.name, baseId, types, image: showdownDexSprite({ name: entry.name }) } : { id: entry.id, baseId, name: entry.name, types, image: showdownDexSprite({ name: entry.name }) };
         });
         if (cancelled) return;
         setPokemonCatalog(catalog);
@@ -293,7 +349,7 @@ function App() {
             if (pokemon.types?.length) return pokemon;
             try {
               const data = await loadPokemonData(pokemon.id);
-              return { ...pokemon, types: data.types.map(({ type }) => type.name.replace(/^./, (letter) => letter.toUpperCase())) };
+              return { ...pokemon, types: getCorrectedPokemonTypes(pokemon, data.types.map(({ type }) => type.name.replace(/^./, (letter) => letter.toUpperCase()))) };
             } catch {
               return pokemon;
             }
@@ -311,15 +367,17 @@ function App() {
   const options = useMemo(
     () =>
       pokemonCatalog.filter((pokemon) =>
-        selectedGenerations.includes(getGeneration(pokemon.id)) && pokemon.name.toLowerCase().includes(query.toLowerCase()),
+        (selectedGenerations.length === 0 || selectedGenerations.includes(getGeneration(pokemon.baseId || pokemon.id))) &&
+        (selectedTypes.length === 0 || pokemon.types?.some((type) => selectedTypes.includes(type))) &&
+        pokemon.name.toLowerCase().includes(query.toLowerCase()),
       ),
-    [pokemonCatalog, query, selectedGenerations],
+    [pokemonCatalog, query, selectedGenerations, selectedTypes],
   );
   const hydratePokemon = async (pokemon) => {
-    if (pokemon.types?.length) return pokemon;
+    if (pokemon.types?.length) return { ...pokemon, types: getCorrectedPokemonTypes(pokemon, pokemon.types) };
     try {
       const data = await loadPokemonData(pokemon.id);
-      return { ...pokemon, types: data.types.map(({ type }) => type.name.replace(/^./, (letter) => letter.toUpperCase())) };
+      return { ...pokemon, types: getCorrectedPokemonTypes(pokemon, data.types.map(({ type }) => type.name.replace(/^./, (letter) => letter.toUpperCase()))) };
     } catch {
       return pokemon;
     }
@@ -338,6 +396,19 @@ function App() {
     const selected = [...options].sort(() => Math.random() - 0.5).slice(0, 6);
     setTeam(await Promise.all(selected.map(hydratePokemon)));
   };
+  const saveCurrentTeam = () => {
+    if (!team.length) return;
+    const defaultName = `Time ${savedTeams.length + 1}`;
+    const name = window.prompt("Nome do time:", defaultName)?.trim();
+    if (!name) return;
+    setSavedTeams((current) => [...current, { id: Date.now(), name, team }]);
+    setLibraryView("teams");
+  };
+  const loadSavedTeam = (savedTeam) => {
+    setTeam(savedTeam.team);
+    setPage("team");
+    setLibraryView(null);
+  };
 
   return (
     <main className="app-shell">
@@ -348,7 +419,11 @@ function App() {
         <h1>Pokémon Team Builder</h1>
         <div className="top-links"></div>
       </header>
+      <LibraryMenu libraryView={libraryView} setLibraryView={setLibraryView} saveCurrentTeam={saveCurrentTeam} />
+      {libraryView === "teams" && <SavedTeamsPage savedTeams={savedTeams} onLoad={loadSavedTeam} onDelete={(id) => setSavedTeams((current) => current.filter((savedTeam) => savedTeam.id !== id))} />}
+      {libraryView === "box" && <BoxPage box={box} pokemonCatalog={pokemonCatalog} onCapture={(pokemon) => setBox((current) => current.some((item) => item.id === pokemon.id) ? current : [...current, pokemon])} onRemove={(id) => setBox((current) => current.filter((pokemon) => pokemon.id !== id))} onAddToTeam={(pokemon) => { if (team.length < 6 && !team.some((item) => item.id === pokemon.id)) setTeam((current) => [...current, pokemon]); }} />}
       <div className={page === "team" ? "" : "page-hidden"}>
+      <div className={libraryView ? "page-hidden" : ""}>
       <div className="intro">
         <p>
           Use esta ferramenta para planejar sua equipe para uma partida no jogo.
@@ -358,7 +433,7 @@ function App() {
         </p>
       </div>
       <section className="panel team-panel">
-        <h2>Meu time</h2>
+        <h2 className="team-title">Meu time <button className="save-team-button" onClick={saveCurrentTeam} disabled={!team.length} title="Salvar time completo" aria-label="Salvar time completo">♥</button></h2>
         <div className="team-slots">
           {Array.from({ length: 6 }, (_, index) => (
             <TeamSlot
@@ -382,10 +457,14 @@ function App() {
       <section className="panel options-panel">
         <h2>Opções</h2>
         <button className="filter-button">Filtros</button>
-        <div className="generation">Gerações I–V · {options.length} Pokémon disponíveis</div>
+        <div className="generation">Gerações I–IX · {options.length} Pokémon disponíveis</div>
         <div className="generation-filter">
           <button className="generation-button" onClick={() => setShowGenerations((current) => !current)}>Gerações ▾</button>
-          {showGenerations && <div className="generation-menu">{Object.keys(generationRanges).map((generation) => <label key={generation}><input type="checkbox" checked={selectedGenerations.includes(generation)} onChange={() => setSelectedGenerations((current) => current.includes(generation) ? current.filter((item) => item !== generation) : [...current, generation])} /> Geração {generation}</label>)}<small>Você pode misturar gerações na mesma equipe.</small></div>}
+          {showGenerations && <div className="generation-menu">{Object.keys(generationRanges).map((generation) => <label key={generation}><input type="checkbox" checked={selectedGenerations.includes(generation)} onChange={() => setSelectedGenerations((current) => current.includes(generation) ? current.filter((item) => item !== generation) : [...current, generation])} /> Geração {generation}</label>)}<small>Nenhuma seleção mostra todas as gerações. Você pode misturar gerações.</small></div>}
+        </div>
+        <div className="generation-filter type-filter">
+          <button className="generation-button" onClick={() => setShowTypes((current) => !current)}>Tipos ▾</button>
+          {showTypes && <div className="generation-menu">{allTypes.map((type) => <label key={type}><input type="checkbox" checked={selectedTypes.includes(type)} onChange={() => setSelectedTypes((current) => current.includes(type) ? current.filter((item) => item !== type) : [...current, type])} /> {typeNames[type] || type}</label>)}<small>Nenhuma seleção mostra todos os tipos.</small></div>}
         </div>
         <div className="search-row">
           <input
@@ -411,11 +490,62 @@ function App() {
       </section>
       <footer>Pokémon Team Builder · Kanto region</footer>
       </div>
-      {page === "moves" && <MovesPage team={team} movesByPokemon={movesByPokemon} setMovesByPokemon={setMovesByPokemon} chosenMoves={chosenMoves} setChosenMoves={setChosenMoves} />}
-      {page === "battles" && <BattlesPage team={team} chosenMoves={chosenMoves} pokemonCatalog={pokemonCatalog} />}
-      <BottomNav page={page} setPage={setPage} />
+      </div>
+      {!libraryView && page === "moves" && <MovesPage team={team} movesByPokemon={movesByPokemon} setMovesByPokemon={setMovesByPokemon} chosenMoves={chosenMoves} setChosenMoves={setChosenMoves} />}
+      {!libraryView && page === "battles" && <BattlesPage team={team} chosenMoves={chosenMoves} pokemonCatalog={pokemonCatalog} />}
+      <BottomNav page={page} setPage={(nextPage) => { setPage(nextPage); setLibraryView(null); }} />
     </main>
   );
+}
+
+function LibraryMenu({ libraryView, setLibraryView, saveCurrentTeam }) {
+  return <aside className="library-menu">
+    <div className="library-menu-title">Minha coleção</div>
+    <button className={libraryView === "teams" ? "active" : ""} onClick={() => setLibraryView(libraryView === "teams" ? null : "teams")}><span>▣</span> Times salvos</button>
+    <button className={libraryView === "box" ? "active" : ""} onClick={() => setLibraryView(libraryView === "box" ? null : "box")}><span>▤</span> Minha Box</button>
+    <button className="library-save" onClick={saveCurrentTeam}><span>＋</span> Salvar time atual</button>
+  </aside>;
+}
+
+function SavedTeamsPage({ savedTeams, onLoad, onDelete }) {
+  return <section className="collection-page"><div className="subpage-heading"><span className="section-label">Coleção</span><h2>Times salvos</h2><p>Guarde suas equipes para carregar novamente quando quiser.</p></div>{savedTeams.length ? <div className="saved-team-grid">{savedTeams.map((savedTeam) => <article className="saved-team-card" key={savedTeam.id}><div className="saved-team-heading"><strong>{savedTeam.name}</strong><small>{savedTeam.team.length}/6 Pokémon</small></div><div className="saved-team-pokemon">{savedTeam.team.map((pokemon) => <img key={pokemon.id} src={pokemon.image || showdownPokemonSprite(pokemon)} alt={pokemon.name} title={pokemon.name} />)}</div><div className="saved-team-actions"><button onClick={() => onLoad(savedTeam)}>Carregar</button><button onClick={() => onDelete(savedTeam.id)}>Excluir</button></div></article>)}</div> : <div className="collection-empty">Você ainda não salvou nenhum time.</div>}</section>;
+}
+
+function BoxPage({ box, pokemonCatalog, onCapture, onRemove, onAddToTeam }) {
+  const [showPokedex, setShowPokedex] = useState(false);
+  const [query, setQuery] = useState("");
+  const [generationFilter, setGenerationFilter] = useState("all");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [evolutionFilter, setEvolutionFilter] = useState("all");
+  const [finalEvolutionIds, setFinalEvolutionIds] = useState(() => new Set());
+  const [evolutionLoading, setEvolutionLoading] = useState(false);
+  const checkedEvolutionIds = useRef(new Set());
+  const evolutionLoadingRef = useRef(false);
+  useEffect(() => {
+    if (evolutionFilter !== "final" || evolutionLoadingRef.current) return;
+    let cancelled = false;
+    const loadEvolutionFlags = async () => {
+      const pending = pokemonCatalog.filter((pokemon) => !checkedEvolutionIds.current.has(pokemon.id));
+      if (!pending.length) return;
+      evolutionLoadingRef.current = true;
+      setEvolutionLoading(true);
+      for (let index = 0; index < pending.length; index += 20) {
+        const batch = pending.slice(index, index + 20);
+        const results = await Promise.all(batch.map(async (pokemon) => {
+          try { return { id: pokemon.id, final: await isFinalEvolution(pokemon) }; } catch { return { id: pokemon.id, final: true }; }
+        }));
+        if (cancelled) { evolutionLoadingRef.current = false; return; }
+        results.forEach(({ id }) => checkedEvolutionIds.current.add(id));
+        setFinalEvolutionIds((current) => { const next = new Set(current); results.filter(({ final }) => final).forEach(({ id }) => next.add(id)); return next; });
+      }
+      evolutionLoadingRef.current = false;
+      if (!cancelled) setEvolutionLoading(false);
+    };
+    loadEvolutionFlags();
+    return () => { cancelled = true; };
+  }, [evolutionFilter, pokemonCatalog]);
+  const availablePokemon = pokemonCatalog.filter((pokemon) => pokemon.name.toLowerCase().includes(query.toLowerCase()) && (generationFilter === "all" || getGeneration(pokemon.baseId || pokemon.id) === generationFilter) && (typeFilter === "all" || pokemon.types?.includes(typeFilter)) && (evolutionFilter !== "final" || finalEvolutionIds.has(pokemon.id)));
+  return <section className="collection-page"><div className="subpage-heading"><span className="section-label">Coleção</span><h2>Minha Box</h2><p>Seus Pokémon capturados ficam salvos individualmente nesta coleção.</p><button className="pokedex-open-button" onClick={() => setShowPokedex((current) => !current)}>{showPokedex ? "Fechar Pokédex" : "Abrir Pokédex"}</button></div>{showPokedex && <div className="pokedex-panel"><div className="pokedex-panel-heading"><strong>Pokédex</strong><small>Selecione um Pokémon para capturá-lo na sua Box.</small></div><div className="pokedex-filters"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar Pokémon..." /><select value={generationFilter} onChange={(event) => setGenerationFilter(event.target.value)}><option value="all">Todas as gerações</option>{Object.keys(generationRanges).map((generation) => <option key={generation} value={generation}>Geração {generation}</option>)}</select><select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}><option value="all">Todos os tipos</option>{allTypes.map((type) => <option key={type} value={type}>{typeNames[type] || type}</option>)}</select><select value={evolutionFilter} onChange={(event) => setEvolutionFilter(event.target.value)}><option value="all">Todas as evoluções</option><option value="final">Apenas última evolução</option></select></div>{evolutionLoading && evolutionFilter === "final" && <div className="pokedex-loading">Identificando cadeias evolutivas...</div>}<div className="pokedex-grid">{availablePokemon.map((pokemon) => { const captured = box.some((item) => item.id === pokemon.id); return <button className={captured ? "captured" : ""} key={pokemon.id} onClick={() => onCapture(pokemon)} title={captured ? `${pokemon.name} já está na Box` : `Capturar ${pokemon.name}`}><PokemonImage pokemon={pokemon} alt="" /><span>{pokemon.name}</span>{captured && <small>NA BOX</small>}</button>; })}</div></div>}{box.length ? <div className="box-grid">{box.map((pokemon) => <article className="box-pokemon" key={pokemon.id}><PokemonImage pokemon={pokemon} alt={pokemon.name} /><strong>{pokemon.name}</strong><small>{formatTypes(pokemon.types || [])}</small><button onClick={() => onAddToTeam(pokemon)}>Adicionar ao time</button><button className="box-remove-button" onClick={() => onRemove(pokemon.id)}>Remover da Box</button></article>)}</div> : <div className="collection-empty">Sua Box está vazia. Abra a Pokédex e selecione Pokémon para capturá-los.</div>}</section>;
 }
 
 function MovesPage({ team, movesByPokemon, setMovesByPokemon, chosenMoves, setChosenMoves }) {
@@ -486,6 +616,7 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
   const [error, setError] = useState("");
   const [activeBattle, setActiveBattle] = useState(null);
   const [battleLoading, setBattleLoading] = useState(false);
+  const [reviewMode, setReviewMode] = useState(false);
 
   const startTournament = async () => {
     setLoading(true);
@@ -537,6 +668,40 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
     }));
   };
 
+  const simulateOneMatch = () => {
+    if (!tournament || tournament.champion || tournament.eliminated) return;
+    const currentMatches = tournament.rounds[tournament.currentRound];
+    const target = currentMatches.find((match) => !match.winner && !match.a.isUser && !match.b.isUser);
+    if (!target) {
+      setError("Não há uma luta de IA disponível nesta rodada.");
+      return;
+    }
+    const winner = Math.random() < calculateTeamPower(target.a) / (calculateTeamPower(target.a) + calculateTeamPower(target.b)) ? target.a : target.b;
+    const resolved = currentMatches.map((match) => match.id === target.id ? { ...match, winner } : match);
+    if (!resolved.every((match) => match.winner)) {
+      setTournament((current) => ({ ...current, rounds: current.rounds.map((round, index) => index === current.currentRound ? resolved : round) }));
+      return;
+    }
+    const winners = resolved.map((match) => match.winner);
+    const isFinal = winners.length === 1;
+    setTournament((current) => ({
+      ...current,
+      rounds: isFinal ? current.rounds.map((round, index) => index === current.currentRound ? resolved : round) : [...current.rounds.map((round, index) => index === current.currentRound ? resolved : round), createMatches(winners)],
+      currentRound: isFinal ? current.currentRound : current.currentRound + 1,
+      champion: isFinal ? winners[0] : null,
+    }));
+  };
+
+  const reviewNextMatch = () => {
+    if (!tournament || activeBattle || tournament.champion || tournament.eliminated) return;
+    const match = (tournament.rounds[tournament.currentRound] || []).find((item) => !item.winner && !item.a.isUser && !item.b.isUser);
+    if (!match) {
+      setError("Não há uma luta de IA disponível para revisar nesta rodada.");
+      return;
+    }
+    beginReviewBattle(match);
+  };
+
   const beginBattle = async (match) => {
     setBattleLoading(true);
     setError("");
@@ -567,6 +732,8 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
         enemyBoosts: { 0: {} },
         playerStatuses: { 0: emptyStatus() },
         enemyStatuses: { 0: emptyStatus() },
+        playerKOs: 0,
+        playerSwitchTokens: 0,
         battleApiSnapshot,
         turn: 0,
         animations: [],
@@ -581,11 +748,55 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
     }
   };
 
+  const beginReviewBattle = async (match) => {
+    setBattleLoading(true);
+    setError("");
+    try {
+      const enrichTrainer = async (trainer) => ({
+        ...trainer,
+        team: await Promise.all(trainer.team.map(async (pokemon) => ({
+          ...pokemon,
+          moves: await Promise.all(pokemon.moves.map((move) => move.url ? loadMove(move.url) : Promise.resolve(move))),
+        }))),
+      });
+      const [player, enemy] = await Promise.all([enrichTrainer(match.a), enrichTrainer(match.b)]);
+      const playerPokemon = player.team[0];
+      const enemyPokemon = enemy.team[0];
+      setActiveBattle({
+        matchId: match.id,
+        review: true,
+        player,
+        enemy,
+        playerIndex: 0,
+        enemyIndex: 0,
+        playerHp: getMaxHp(playerPokemon),
+        enemyHp: getMaxHp(enemyPokemon),
+        faintedPlayer: [],
+        faintedEnemy: [],
+        playerBoosts: { 0: {} },
+        enemyBoosts: { 0: {} },
+        playerStatuses: { 0: emptyStatus() },
+        enemyStatuses: { 0: emptyStatus() },
+        playerKOs: 0,
+        playerSwitchTokens: 0,
+        turn: 0,
+        animations: [],
+        resolving: false,
+        log: [`${playerPokemon.name} entrou na revisão contra ${enemyPokemon.name}!`],
+        finished: false,
+      });
+    } catch (requestError) {
+      setError(`Não foi possível revisar essa luta: ${requestError.message}`);
+    } finally {
+      setBattleLoading(false);
+    }
+  };
+
   const finishBattle = (winner) => {
     setTournament((current) => {
       if (!current) return current;
       const rounds = current.rounds.map((round, index) => index === current.currentRound ? round.map((match) => match.id === activeBattle.matchId ? { ...match, winner } : match) : round);
-      return { ...current, rounds, eliminated: !winner.isUser && winner.id !== "user" };
+      return { ...current, rounds, eliminated: activeBattle.review ? current.eliminated : !winner.isUser && winner.id !== "user" };
     });
     setActiveBattle(null);
   };
@@ -596,9 +807,9 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
     const enemyPokemon = activeBattle.enemy.team[activeBattle.enemyIndex];
     playerPokemon.status = activeBattle.playerStatuses[activeBattle.playerIndex] || emptyStatus();
     enemyPokemon.status = activeBattle.enemyStatuses[activeBattle.enemyIndex] || emptyStatus();
-    const enemyMove = randomItems(enemyPokemon.moves, 1)[0];
     const playerSpeed = getBattleStat(playerPokemon, "speed") * (playerPokemon.status.condition === "par" ? 0.5 : 1) * getStageMultiplier((activeBattle.playerBoosts[activeBattle.playerIndex] || {}).speed);
     const enemySpeed = getBattleStat(enemyPokemon, "speed") * (enemyPokemon.status.condition === "par" ? 0.5 : 1) * getStageMultiplier((activeBattle.enemyBoosts[activeBattle.enemyIndex] || {}).speed);
+    const enemyMove = randomItems(enemyPokemon.moves, 1)[0];
     const actions = playerSpeed >= enemySpeed ? [{ side: "player", move }, { side: "enemy", move: enemyMove }] : [{ side: "enemy", move: enemyMove }, { side: "player", move }];
     let next = { ...activeBattle, turn: (activeBattle.turn || 0) + 1, resolving: true, animations: actions.map((action, index) => ({ id: `${activeBattle.turn}-${index}-${action.move.name}`, side: action.side, type: action.move.type, asset: attackEffectAssets[action.move.type], symbol: animationSymbols[action.move.type] || "✦" })), log: [...activeBattle.log, `--- Turno ${(activeBattle.turn || 0) + 1} ---`], playerBoosts: { ...activeBattle.playerBoosts }, enemyBoosts: { ...activeBattle.enemyBoosts }, playerStatuses: { ...activeBattle.playerStatuses }, enemyStatuses: { ...activeBattle.enemyStatuses } };
 
@@ -644,6 +855,10 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
         next.pendingReplacement = { side: targetIsEnemy ? "enemy" : "player", fainted };
         if (targetIsEnemy) next.faintedEnemy = fainted;
         else next.faintedPlayer = fainted;
+        if (targetIsEnemy) {
+          next.playerKOs += 1;
+          if (next.playerKOs % 2 === 0) next.playerSwitchTokens += 1;
+        }
         break;
       }
     }
@@ -664,6 +879,10 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
             const fainted = side === "player" ? [...next.faintedPlayer, index] : [...next.faintedEnemy, index];
             if (side === "player") next.faintedPlayer = fainted;
             else next.faintedEnemy = fainted;
+            if (side === "enemy") {
+              next.playerKOs += 1;
+              if (next.playerKOs % 2 === 0) next.playerSwitchTokens += 1;
+            }
             next.pendingReplacement = { side, fainted };
             break;
           }
@@ -688,8 +907,18 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
     }, 900);
   };
 
+  useEffect(() => {
+    if (!activeBattle?.review || activeBattle.resolving || activeBattle.finished) return undefined;
+    const timer = window.setTimeout(() => {
+      const pokemon = activeBattle.player.team[activeBattle.playerIndex];
+      const move = randomItems(pokemon.moves, 1)[0];
+      if (move) playMove(move);
+    }, 850);
+    return () => window.clearTimeout(timer);
+  }, [activeBattle]);
+
   const switchPokemon = (nextIndex) => {
-    if (!activeBattle || activeBattle.resolving || nextIndex === activeBattle.playerIndex || activeBattle.faintedPlayer.includes(nextIndex)) return;
+    if (!activeBattle || activeBattle.resolving || activeBattle.playerSwitchTokens < 1 || nextIndex === activeBattle.playerIndex || activeBattle.faintedPlayer.includes(nextIndex)) return;
     const nextPokemon = activeBattle.player.team[nextIndex];
     const enemyPokemon = activeBattle.enemy.team[activeBattle.enemyIndex];
     nextPokemon.status = activeBattle.playerStatuses[nextIndex] || emptyStatus();
@@ -712,15 +941,15 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
       }
       const fallbackIndex = getNextAvailableIndex(activeBattle.player.team, faintedPlayer);
       const fallbackPokemon = activeBattle.player.team[fallbackIndex];
-      setActiveBattle({ ...activeBattle, turn: (activeBattle.turn || 0) + 1, animations, playerIndex: fallbackIndex, playerHp: getMaxHp(fallbackPokemon), faintedPlayer, enemyBoosts, playerStatuses, log: [...log, `${fallbackPokemon.name} entrou na batalha!`] });
+      setActiveBattle({ ...activeBattle, turn: (activeBattle.turn || 0) + 1, animations, playerIndex: fallbackIndex, playerHp: getMaxHp(fallbackPokemon), faintedPlayer, enemyBoosts, playerStatuses, playerSwitchTokens: activeBattle.playerSwitchTokens - 1, log: [...log, `${fallbackPokemon.name} entrou na batalha!`] });
       return;
     }
-    setActiveBattle({ ...activeBattle, turn: (activeBattle.turn || 0) + 1, animations, playerIndex: nextIndex, playerHp, enemyBoosts, playerStatuses, log });
+    setActiveBattle({ ...activeBattle, turn: (activeBattle.turn || 0) + 1, animations, playerIndex: nextIndex, playerHp, enemyBoosts, playerStatuses, playerSwitchTokens: activeBattle.playerSwitchTokens - 1, log: [...log, `Trocas disponíveis restantes: ${activeBattle.playerSwitchTokens - 1}.`] });
   };
 
   const roundNames = ["Quartas de final", "Semifinais", "Grande final"];
   const currentMatches = tournament?.rounds[tournament.currentRound] || [];
-  return <section className="subpage"><div className="subpage-heading"><span className="section-label">Arena</span><h2>Torneio Pokémon</h2><p>Batalhas por turnos inspiradas nos jogos oficiais: escolha golpes, acompanhe o HP, troque Pokémon e avance na chave.</p></div>{error && <div className="api-error">{error}</div>}{!team.length ? <EmptyPage text="Adicione Pokémon ao seu time antes de entrar no torneio." /> : <><div className="tournament-actions"><button className="battle-button" onClick={startTournament} disabled={loading || battleLoading}>{loading ? "Montando torneio..." : tournament ? "Novo torneio" : "Montar torneio"}</button>{tournament && !tournament.champion && !tournament.eliminated && <button className="secondary-button" onClick={simulateRound}>Simular lutas dos adversários</button>}</div>{battleLoading && <div className="loading-card">Carregando os golpes da batalha...</div>}{activeBattle && <BattleArena battle={activeBattle} onMove={playMove} onSwitch={switchPokemon} />}{tournament && !activeBattle && <><div className="round-title"><span>{tournament.champion ? "Torneio encerrado" : tournament.eliminated ? "Você foi eliminado" : roundNames[tournament.currentRound]}</span><small>{tournament.champion ? `Campeão: ${tournament.champion.name}` : `${currentMatches.length} batalha(s)`}</small></div><div className="tournament-grid">{currentMatches.map((match) => <TournamentMatch key={match.id} match={match} onBattle={beginBattle} />)}</div>{tournament.champion && <div className="champion-card">🏆 <strong>{tournament.champion.name} venceu o torneio!</strong><span>O campeão terminou com uma equipe de {tournament.champion.team.length} Pokémon.</span></div>}{tournament.eliminated && <div className="elimination-card">Seu time foi derrotado. Monte um novo torneio para tentar novamente.</div>}</>}</>}</section>;
+  return <section className="subpage"><div className="subpage-heading"><span className="section-label">Arena</span><h2>Torneio Pokémon</h2><p>Batalhas por turnos inspiradas nos jogos oficiais: escolha golpes, acompanhe o HP, troque Pokémon e avance na chave.</p></div>{error && <div className="api-error">{error}</div>}{!team.length ? <EmptyPage text="Adicione Pokémon ao seu time antes de entrar no torneio." /> : <><div className="tournament-actions"><button className="battle-button" onClick={startTournament} disabled={loading || battleLoading}>{loading ? "Montando torneio..." : tournament ? "Novo torneio" : "Montar torneio"}</button>{tournament && !tournament.champion && !tournament.eliminated && <><button className="secondary-button" onClick={() => setReviewMode((current) => !current)}>{reviewMode ? "Sair do modo review" : "Modo review"}</button><button className="secondary-button" onClick={simulateRound}>Simular todas</button><button className="secondary-button" onClick={simulateOneMatch}>Simular uma</button>{reviewMode && <button className="secondary-button" onClick={reviewNextMatch}>Ver próxima luta</button>}</>}</div>{battleLoading && <div className="loading-card">Carregando os golpes da batalha...</div>}{activeBattle && <BattleArena battle={activeBattle} onMove={playMove} onSwitch={switchPokemon} />}{tournament && !activeBattle && <><div className="round-title"><span>{tournament.champion ? "Torneio encerrado" : tournament.eliminated ? "Você foi eliminado" : roundNames[tournament.currentRound]}</span><small>{tournament.champion ? `Campeão: ${tournament.champion.name}` : `${currentMatches.length} batalha(s)`}</small></div><div className="tournament-grid">{currentMatches.map((match) => <TournamentMatch key={match.id} match={match} onBattle={beginBattle} reviewMode={reviewMode} onReview={beginReviewBattle} />)}</div>{tournament.champion && <div className="champion-card">🏆 <strong>{tournament.champion.name} venceu o torneio!</strong><span>O campeão terminou com uma equipe de {tournament.champion.team.length} Pokémon.</span></div>}{tournament.eliminated && <div className="elimination-card">Seu time foi derrotado. Monte um novo torneio para tentar novamente.</div>}</>}</>}</section>;
 }
 
 function BoostDisplay({ boosts }) {
@@ -765,13 +994,16 @@ function BattleArena({ battle, onMove, onSwitch }) {
   const selectMove = (move) => { setMenu("main"); onMove(move); };
   const selectPokemon = (index) => { setMenu("main"); onSwitch(index); };
   const renderMoveMenu = () => <div className="classic-move-menu"><div className="move-menu-title">Escolha um golpe</div><div className="classic-move-grid">{playerPokemon.moves.map((move) => <button key={move.id || move.name} onClick={() => selectMove(move)}><MoveArtwork move={move} /><span className="move-button-copy"><strong>{moveLabel(move)}</strong><small>{moveTypeNames[move.type] || move.type} · {categoryNames[move.category]} · PP {move.pp || "—"}</small></span></button>)}</div><button className="classic-back" onClick={() => setMenu("main")}>VOLTAR</button></div>;
-  const renderPokemonMenu = () => <div className="classic-pokemon-menu"><div className="move-menu-title">Escolha um Pokémon</div><div className="classic-pokemon-grid">{battle.player.team.map((pokemon, index) => <button key={pokemon.id} disabled={index === battle.playerIndex || battle.faintedPlayer.includes(index)} onClick={() => selectPokemon(index)}><img src={pokemon.image} alt="" /><span>{pokemon.name}</span><small>{index === battle.playerIndex ? "EM CAMPO" : battle.faintedPlayer.includes(index) ? "DESMAIADO" : "DISPONÍVEL"}</small></button>)}</div><button className="classic-back" onClick={() => setMenu("main")}>VOLTAR</button></div>;
-  return <div className="battle-arena"><div className="battle-header"><span>{battle.player.name}<TeamIndicators team={battle.player.team} fainted={battle.faintedPlayer} current={battle.playerIndex} /></span><strong>VS</strong><span><TeamIndicators team={battle.enemy.team} fainted={battle.faintedEnemy} current={battle.enemyIndex} />{battle.enemy.name}</span></div><div className="battle-layout"><div className="battle-left"><div className="battle-field"><div className={`battle-side enemy-side ${battle.pendingReplacement?.side === "enemy" ? "fainted-side" : ""}`}><div className="battle-status"><strong>{enemyPokemon.name}</strong><StatusDisplay status={battle.enemyStatuses[ battle.enemyIndex ]} /><span>Lv {enemyPokemon.level || 100}</span><span>HP {battle.enemyHp}/{enemyMaxHp}</span><div className="hp-track"><i className={hpState(battle.enemyHp, enemyMaxHp)} style={{ width: hpPercent(battle.enemyHp, enemyMaxHp) }} /></div><BoostDisplay boosts={battle.enemyBoosts[ battle.enemyIndex ]} /></div><BattleSprite pokemon={enemyPokemon} enemy /></div><div className={`battle-side player-side ${battle.pendingReplacement?.side === "player" ? "fainted-side" : ""}`}><BattleSprite pokemon={playerPokemon} /><div className="battle-status"><strong>{playerPokemon.name}</strong><StatusDisplay status={battle.playerStatuses[ battle.playerIndex ]} /><span>Lv {playerPokemon.level || 100}</span><span>HP {battle.playerHp}/{playerMaxHp}</span><div className="hp-track"><i className={hpState(battle.playerHp, playerMaxHp)} style={{ width: hpPercent(battle.playerHp, playerMaxHp) }} /></div><BoostDisplay boosts={battle.playerBoosts[ battle.playerIndex ]} /></div></div>{(battle.animations || []).map((animation, index) => <div className={`battle-fx ${animation.side} type-${animation.type}`} style={{ animationDelay: `${index * 380}ms` }} key={animation.id}>{animation.asset ? <img src={animation.asset} alt="" /> : <span>{animation.symbol}</span>}</div>)}</div><div className="classic-controls">{menu === "main" && <div className="classic-command"><div className="classic-prompt">{battle.resolving ? "Aguarde o resultado..." : `O que ${playerPokemon.name} fará?`}</div><button disabled={battle.resolving} onClick={() => setMenu("fight")}>FIGHT</button><button disabled={battle.resolving} onClick={() => setMenu("pokemon")}>POKÉMON</button></div>}{menu === "fight" && renderMoveMenu()}{menu === "pokemon" && renderPokemonMenu()}{menu !== "pokemon" && <div className="classic-switch-row"><strong>Switch</strong><div>{battle.player.team.map((pokemon, index) => <button key={pokemon.id} disabled={battle.resolving || index === battle.playerIndex || battle.faintedPlayer.includes(index)} onClick={() => selectPokemon(index)}><img src={pokemon.image} alt="" /><span>{pokemon.name}</span></button>)}</div></div>}</div></div><aside className="battle-log-side"><div className="trainer-rail"><div><img src={showdownTrainerSprite(battle.enemy.trainerSprite)} alt="" /><small>{battle.enemy.name}</small></div><div><img src={showdownTrainerSprite(battle.player.trainerSprite)} alt="" /><small>{battle.player.name}</small></div></div><div className="battle-log" ref={logRef}>{battle.log.map((line, index) => <p className={line.startsWith("---") ? "turn-divider" : ""} key={`${line}-${index}`}>{line}</p>)}</div></aside></div></div>;
+  const renderPokemonMenu = () => <div className="classic-pokemon-menu"><div className="move-menu-title">Escolha um Pokémon <small>Trocas disponíveis: {battle.playerSwitchTokens}</small></div><div className="classic-pokemon-grid">{battle.player.team.map((pokemon, index) => <button key={pokemon.id} disabled={battle.playerSwitchTokens < 1 || index === battle.playerIndex || battle.faintedPlayer.includes(index)} onClick={() => selectPokemon(index)}><img src={pokemon.image} alt="" /><span>{pokemon.name}</span><small>{index === battle.playerIndex ? "EM CAMPO" : battle.faintedPlayer.includes(index) ? "DESMAIADO" : battle.playerSwitchTokens < 1 ? "AGUARDE 2 KOs" : "DISPONÍVEL"}</small></button>)}</div><button className="classic-back" onClick={() => setMenu("main")}>VOLTAR</button></div>;
+  const controls = battle.review
+    ? <div className="classic-command"><div className="classic-prompt">Revisão automática: as duas IAs estão batalhando...</div></div>
+    : <>{menu === "main" && <div className="classic-command"><div className="classic-prompt">{battle.resolving ? "Aguarde o resultado..." : `O que ${playerPokemon.name} fará?`}</div><button disabled={battle.resolving} onClick={() => setMenu("fight")}>FIGHT</button><button disabled={battle.resolving} onClick={() => setMenu("pokemon")}>POKÉMON</button></div>}{menu === "fight" && renderMoveMenu()}{menu === "pokemon" && renderPokemonMenu()}{menu !== "pokemon" && <div className="classic-switch-row"><strong>Switch · {battle.playerSwitchTokens} disponível(is)</strong><div>{battle.player.team.map((pokemon, index) => <button key={pokemon.id} disabled={battle.resolving || battle.playerSwitchTokens < 1 || index === battle.playerIndex || battle.faintedPlayer.includes(index)} onClick={() => selectPokemon(index)}><img src={pokemon.image} alt="" /><span>{pokemon.name}</span></button>)}</div></div>}</>;
+  return <div className="battle-arena"><div className="battle-header"><span>{battle.player.name}<TeamIndicators team={battle.player.team} fainted={battle.faintedPlayer} current={battle.playerIndex} /></span><strong>VS</strong><span><TeamIndicators team={battle.enemy.team} fainted={battle.faintedEnemy} current={battle.enemyIndex} />{battle.enemy.name}</span></div><div className="battle-layout"><div className="battle-left"><div className="battle-field"><div className={`battle-side enemy-side ${battle.pendingReplacement?.side === "enemy" ? "fainted-side" : ""}`}><div className="battle-status"><strong>{enemyPokemon.name}</strong><StatusDisplay status={battle.enemyStatuses[ battle.enemyIndex ]} /><span>Lv {enemyPokemon.level || 100}</span><span>HP {battle.enemyHp}/{enemyMaxHp}</span><div className="hp-track"><i className={hpState(battle.enemyHp, enemyMaxHp)} style={{ width: hpPercent(battle.enemyHp, enemyMaxHp) }} /></div><BoostDisplay boosts={battle.enemyBoosts[ battle.enemyIndex ]} /></div><BattleSprite pokemon={enemyPokemon} enemy /></div><div className={`battle-side player-side ${battle.pendingReplacement?.side === "player" ? "fainted-side" : ""}`}><BattleSprite pokemon={playerPokemon} /><div className="battle-status"><strong>{playerPokemon.name}</strong><StatusDisplay status={battle.playerStatuses[ battle.playerIndex ]} /><span>Lv {playerPokemon.level || 100}</span><span>HP {battle.playerHp}/{playerMaxHp}</span><div className="hp-track"><i className={hpState(battle.playerHp, playerMaxHp)} style={{ width: hpPercent(battle.playerHp, playerMaxHp) }} /></div><BoostDisplay boosts={battle.playerBoosts[ battle.playerIndex ]} /></div></div>{(battle.animations || []).map((animation, index) => <div className={`battle-fx ${animation.side} type-${animation.type}`} style={{ animationDelay: `${index * 380}ms` }} key={animation.id}>{animation.asset ? <img src={animation.asset} alt="" /> : <span>{animation.symbol}</span>}</div>)}</div><div className="classic-controls">{controls}</div></div><aside className="battle-log-side"><div className="trainer-rail"><div><img src={showdownTrainerSprite(battle.enemy.trainerSprite)} alt="" /><small>{battle.enemy.name}</small></div><div><img src={showdownTrainerSprite(battle.player.trainerSprite)} alt="" /><small>{battle.player.name}</small></div></div><div className="battle-log" ref={logRef}>{battle.log.map((line, index) => <p className={line.startsWith("---") ? "turn-divider" : ""} key={`${line}-${index}`}>{line}</p>)}</div></aside></div></div>;
 }
 
-function TournamentMatch({ match, onBattle }) {
+function TournamentMatch({ match, onBattle, reviewMode, onReview }) {
   const trainer = (candidate) => <div className={`trainer ${match.winner?.id === candidate.id ? "winner" : ""}`}><div className="trainer-heading"><strong>{candidate.name}{candidate.isUser ? " (você)" : ""}</strong><small>{candidate.team.length} Pokémon</small></div><div className="fighter-list">{candidate.team.map((pokemon) => <div key={pokemon.id}><img src={pokemon.image} alt="" /><span>{pokemon.name}<small>{pokemon.moves.slice(0, 4).map(moveLabel).join(", ")}</small></span></div>)}</div></div>;
-  return <article className="tournament-match">{trainer(match.a)}<div className="versus">VS</div>{trainer(match.b)}{match.winner ? <div className="match-result">Vencedor: {match.winner.name}</div> : (match.a.isUser || match.b.isUser) && <button className="match-battle-button" onClick={() => onBattle(match)}>Batalhar</button>}</article>;
+  return <article className="tournament-match">{trainer(match.a)}<div className="versus">VS</div>{trainer(match.b)}{match.winner ? <div className="match-result">Vencedor: {match.winner.name}</div> : (match.a.isUser || match.b.isUser) ? reviewMode ? <div className="match-result">Luta do jogador — indisponível no review</div> : <button className="match-battle-button" onClick={() => onBattle(match)}>Batalhar</button> : reviewMode && <button className="match-battle-button" onClick={() => onReview(match)}>Revisar luta</button>}</article>;
 }
 
 function EmptyPage({ text }) { return <div className="empty-page"><span>✦</span><p>{text}</p></div>; }
