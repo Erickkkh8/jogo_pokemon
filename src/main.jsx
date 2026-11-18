@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import pokemonList from "../pokemon/gen1.jsx";
+import pokemonList from "./data/pokemon.js";
+import { apiBase, showdownDataBase, battleApiBase, typeSpriteBase } from "./config/api.js";
+import { BottomNav, EmptyPage } from "./components/Navigation.jsx";
 import "./styles.css";
 import "./types.css";
 const typeNames = {
@@ -45,9 +47,6 @@ const typeAdvantages = {
   Fairy: ["Fighting", "Dragon", "Dark"],
 };
 const allTypes = Object.keys(typeAdvantages);
-const apiBase = "https://pokeapi.co/api/v2";
-const battleApiBase = "https://api.pokemonbattle-stage.ru/v2";
-const typeSpriteBase = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/types/generation-viii/brilliant-diamond-shining-pearl";
 const typeIds = { normal: 1, fighting: 2, flying: 3, poison: 4, ground: 5, rock: 6, bug: 7, ghost: 8, steel: 9, fire: 10, water: 11, grass: 12, electric: 13, psychic: 14, ice: 15, dragon: 16, dark: 17, fairy: 18 };
 const generationRanges = { 1: [1, 151], 2: [152, 251], 3: [252, 386], 4: [387, 493], 5: [494, 649], 6: [650, 721], 7: [722, 809], 8: [810, 905], 9: [906, 1025] };
 const getGeneration = (id) => Object.entries(generationRanges).find(([, [start, end]]) => id >= start && id <= end)?.[0] || "1";
@@ -94,6 +93,8 @@ const getEffect = (move) => {
 
 const pokemonDataCache = new Map();
 const evolutionChainCache = new Map();
+const showdownDataCache = new Map();
+const showdownMoveCache = new Map();
 const loadPokemonData = async (pokemonId) => {
   if (!pokemonDataCache.has(pokemonId)) {
     pokemonDataCache.set(pokemonId, fetch(`${apiBase}/pokemon/${pokemonId}`).then((response) => {
@@ -102,6 +103,55 @@ const loadPokemonData = async (pokemonId) => {
     }));
   }
   return pokemonDataCache.get(pokemonId);
+};
+const toShowdownId = (value) => String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+const loadShowdownData = async (file) => {
+  if (!showdownDataCache.has(file)) {
+    showdownDataCache.set(file, fetch(`${showdownDataBase}/${file}.json`).then((response) => {
+      if (!response.ok) throw new Error(`Não foi possível carregar os dados do Showdown (${file}).`);
+      return response.json();
+    }));
+  }
+  return showdownDataCache.get(file);
+};
+const showdownBaseName = (name) => String(name || "").toLowerCase().replace(/^(?:mega-)|(?:-mega(?:-[xy])?)$/g, "");
+const getShowdownNameVariants = (name) => {
+  const normalized = String(name || "").toLowerCase().replace(/female/g, "f").replace(/male/g, "m");
+  const base = showdownBaseName(normalized);
+  return [...new Set([toShowdownId(normalized), toShowdownId(base), toShowdownId(normalized.replace(/-f(?=-mega)|-female(?=-mega)/, "-f"))])];
+};
+const loadShowdownMove = async (moveId) => {
+  if (showdownMoveCache.has(moveId)) return showdownMoveCache.get(moveId);
+  const request = loadShowdownData("moves").then((moves) => {
+    const move = moves[moveId];
+    if (!move) throw new Error("Golpe não encontrado no Showdown.");
+    const category = String(move.category || "Status").toLowerCase();
+    const boosts = move.boosts || move.self?.boosts || {};
+    const statName = { atk: "attack", def: "defense", spa: "special-attack", spd: "special-defense", spe: "speed", accuracy: "accuracy", evasion: "evasion" };
+    return {
+      id: move.num || moveId,
+      name: moveId,
+      type: String(move.type || "Normal").toLowerCase(),
+      power: move.basePower || null,
+      accuracy: move.accuracy === true ? null : move.accuracy,
+      pp: move.pp,
+      effectChance: move.secondary?.chance || move.secondaries?.[0]?.chance || null,
+      category,
+      target: move.target === "self" ? "user" : "selected-pokemon",
+      artwork: moveArtworkSymbols[String(move.type || "normal").toLowerCase()] || "✦",
+      statChanges: Object.entries(boosts).map(([stat, change]) => ({ stat: statName[stat] || stat, change })),
+      effect: move.shortDesc || move.desc || "Efeito não informado.",
+    };
+  });
+  showdownMoveCache.set(moveId, request);
+  return request;
+};
+const loadShowdownPokemonMoves = async (pokemonName) => {
+  if (!pokemonName) return [];
+  const learnsets = await loadShowdownData("learnsets");
+  const variants = getShowdownNameVariants(pokemonName);
+  const learnset = variants.map((id) => learnsets[id]?.learnset).find((entry) => entry && Object.keys(entry).length) || {};
+  return Object.keys(learnset).map((moveId) => ({ name: moveId, url: `showdown://${moveId}` }));
 };
 const getEvolutionLeaves = (chainNode, leaves = new Set()) => {
   if (!chainNode?.evolves_to?.length) leaves.add(chainNode.species.name.toLowerCase());
@@ -132,9 +182,15 @@ const loadBattleApiSnapshot = async () => {
   }
 };
 
-const loadPokemonMoves = async (pokemonId) => {
-  const data = await loadPokemonData(pokemonId);
-  return data.moves
+const loadPokemonMoves = async (pokemonId, fallbackId, pokemonName) => {
+  try {
+    const showdownMoves = await loadShowdownPokemonMoves(pokemonName);
+    if (showdownMoves.length) return showdownMoves.sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    // A PokéAPI continua disponível como fallback.
+  }
+  let data = await loadPokemonData(pokemonId);
+  let moves = data.moves
     .filter(({ version_group_details }) =>
       version_group_details.some(({ move_learn_method }) =>
         ["level-up", "machine", "egg", "tutor"].includes(move_learn_method.name),
@@ -142,11 +198,20 @@ const loadPokemonMoves = async (pokemonId) => {
     )
     .map(({ move }) => move)
     .sort((a, b) => a.name.localeCompare(b.name));
+  if (!moves.length && fallbackId && fallbackId !== pokemonId) {
+    data = await loadPokemonData(fallbackId);
+    moves = data.moves
+      .filter(({ version_group_details }) => version_group_details.some(({ move_learn_method }) => ["level-up", "machine", "egg", "tutor"].includes(move_learn_method.name)))
+      .map(({ move }) => move)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+  return moves;
 };
 
 const getPokemonStats = (data) => Object.fromEntries(data.stats.map(({ stat, base_stat }) => [stat.name, base_stat]));
 
 const loadMove = async (url) => {
+  if (url?.startsWith("showdown://")) return loadShowdownMove(url.replace("showdown://", ""));
   const response = await fetch(url);
   if (!response.ok) throw new Error("Não foi possível carregar os dados do golpe.");
   const move = await response.json();
@@ -190,6 +255,8 @@ function PokemonImage({ pokemon, className = "", alt = "" }) {
 
 const trainerNames = ["Rafael", "Bianca", "Caio", "Lívia", "Diego", "Maya", "Theo", "Helena", "Bruno", "Nina", "Enzo", "Clara"];
 const trainerSprites = ["acetrainer-gen1", "acetrainerf-gen1", "beauty-gen1", "bugcatcher-gen1", "fisher-gen1", "hiker-gen1", "lass-gen1", "schoolboy-gen4", "scientist-gen1", "swimmer-gen1", "youngster-gen1"];
+const tournamentSizes = [4, 8, 16, 32, 64];
+const buildTrainerNames = (amount) => Array.from({ length: amount }, (_, index) => `${trainerNames[index % trainerNames.length]}${index >= trainerNames.length ? ` ${Math.floor(index / trainerNames.length) + 1}` : ""}`);
 const randomItems = (items, amount) => [...items].sort(() => Math.random() - 0.5).slice(0, amount);
 const moveLabel = (move) => move.name.replaceAll("-", " ");
 const showdownPokemonName = (pokemon) => pokemon.name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace("♀", "-f").replace("♂", "-m").replace(/[’.' ]/g, "").replace("mr-mime", "mr-mime");
@@ -219,15 +286,43 @@ const loadTrainerSpritePool = async () => {
 const animationSymbols = { fire: "✦", water: "💧", electric: "ϟ", ice: "❄", grass: "✿", psychic: "✧", fighting: "✚", rock: "◆", ground: "◈", flying: "➤", bug: "✹", poison: "☠", ghost: "☾", dragon: "◇", dark: "☽", steel: "⬢", fairy: "✦", normal: "✦" };
 const moveArtworkSymbols = { fire: "🔥", water: "💦", electric: "⚡", ice: "❄️", grass: "🌿", psychic: "🔮", fighting: "🥊", rock: "🪨", ground: "🌋", flying: "🌪️", bug: "🦋", poison: "☠️", ghost: "👻", dragon: "🐉", dark: "🌑", steel: "⚙️", fairy: "✨", normal: "💥" };
 const attackEffectAssets = {
-  fire: "https://img.craftpix.net/2023/11/Free-Flame-Effects-Sprite-Pack.gif",
-  water: "https://img.craftpix.net/2023/11/Free-Water-Effects-Sprite-Pack.gif",
+  fire: "/assets/attacks/cell-0-0.png",
+  water: "/assets/attacks/cell-1-0.png",
+  grass: "/assets/attacks/cell-2-0.png",
+  electric: "/assets/attacks/cell-3-0.png",
+  normal: "/assets/attacks/cell-4-0.png",
+  flying: "/assets/attacks/cell-5-0.png",
+  psychic: "/assets/attacks/cell-6-0.png",
+  rock: "/assets/attacks/cell-7-0.png",
+  ice: "/assets/attacks/cell-8-0.png",
+  poison: "/assets/attacks/cell-9-0.png",
+  fairy: "/assets/attacks/cell-9-4.png",
+};
+const attackMoveAssets = {
+  ember: "cell-0-0", flamethrower: "cell-0-1", "fire-blast": "cell-0-2", "fire-spin": "cell-0-3", "heat-wave": "cell-0-5",
+  bubble: "cell-1-0", "water-gun": "cell-1-1", "hydro-pump": "cell-1-2", surf: "cell-1-4", waterfall: "cell-1-5",
+  leafage: "cell-2-0", "razor-leaf": "cell-2-1", "vine-whip": "cell-2-2", "solar-beam": "cell-2-3", "giga-drain": "cell-2-5",
+  "thunder-shock": "cell-3-0", thunderbolt: "cell-3-1", thunder: "cell-3-2", "thunder-wave": "cell-3-3", "electro-ball": "cell-3-4",
+  tackle: "cell-4-0", "double-kick": "cell-4-1", "mega-punch": "cell-4-2", "hyper-beam": "cell-4-3", "seismic-toss": "cell-4-4",
+  gust: "cell-5-0", "aerial-ace": "cell-5-1", hurricane: "cell-5-2", fly: "cell-5-3", "brave-bird": "cell-5-5",
+  psychic: "cell-6-0", psyshock: "cell-6-1", "shadow-ball": "cell-6-2", "shadow-claw": "cell-6-3", hex: "cell-6-4",
+  "rock-throw": "cell-7-0", "stone-edge": "cell-7-1", earthquake: "cell-7-2", "sand-attack": "cell-7-3", "rock-polish": "cell-7-4",
+  "ice-shard": "cell-8-0", "ice-beam": "cell-8-1", blizzard: "cell-8-2", "icicle-crash": "cell-8-3", "freeze-dry": "cell-8-5",
+  "poison-sting": "cell-9-0", "sludge-bomb": "cell-9-1", toxic: "cell-9-2", venoshock: "cell-9-3", "fairy-wind": "cell-9-4", "dazzling-gleam": "cell-9-5",
+};
+const getAttackEffectAsset = (move = {}) => {
+  const moveId = String(move.name || "").toLowerCase().replaceAll(" ", "-");
+  return attackMoveAssets[moveId]
+    ? `/assets/attacks/${attackMoveAssets[moveId]}.png`
+    : attackEffectAssets[String(move.type || "normal").toLowerCase()] || attackEffectAssets.normal;
 };
 
 const createRandomOpponent = async (name, id, trainerSprite, catalog) => {
   const selectedPokemon = randomItems(catalog, 6);
   const team = await Promise.all(selectedPokemon.map(async (pokemon) => {
     const data = await loadPokemonData(pokemon.id);
-    return { ...pokemon, types: getCorrectedPokemonTypes(pokemon, data.types.map(({ type }) => type.name.replace(/^./, (letter) => letter.toUpperCase()))), level: 100, stats: getPokemonStats(data), moves: randomItems(data.moves.filter(({ version_group_details }) => version_group_details.some(({ move_learn_method }) => ["level-up", "machine", "egg", "tutor"].includes(move_learn_method.name))).map(({ move }) => move), 4) };
+    const availableMoves = await loadPokemonMoves(pokemon.id, pokemon.baseId, pokemon.name);
+    return { ...pokemon, types: getCorrectedPokemonTypes(pokemon, data.types.map(({ type }) => type.name.replace(/^./, (letter) => letter.toUpperCase()))), level: 100, stats: getPokemonStats(data), moves: randomItems(availableMoves, 4) };
   }));
   return { id, name, isUser: false, trainerSprite, team };
 };
@@ -243,7 +338,40 @@ const createMatches = (trainers) =>
 const calculateTeamPower = (trainer) => trainer.team.reduce((total, pokemon) => total + pokemon.id + pokemon.moves.length * 18, 0);
 const getBattleStat = (pokemon, stat) => Math.floor(((2 * (pokemon.stats?.[stat] || 60) + 31) * (pokemon.level || 100)) / 100) + 5;
 const getMaxHp = (pokemon) => Math.floor(((2 * (pokemon.stats?.hp || 60) + 31) * (pokemon.level || 100)) / 100) + (pokemon.level || 100) + 10;
-const getTypeMultiplier = (moveType, targetTypes) => targetTypes.reduce((multiplier, targetType) => multiplier * (typeChart[moveType]?.[targetType] ?? 1), 1);
+const normalizeBattleType = (type) => {
+  const value = String(type || "").trim().toLowerCase();
+  return value ? value.charAt(0).toUpperCase() + value.slice(1) : "";
+};
+const getTypeMultiplier = (moveType, targetTypes = []) => {
+  const normalizedMoveType = normalizeBattleType(moveType);
+  return targetTypes.reduce(
+    (multiplier, targetType) => multiplier * (typeChart[normalizedMoveType]?.[normalizeBattleType(targetType)] ?? 1),
+    1,
+  );
+};
+const getBattleMoveScore = (move, attacker, defender) => {
+  if (!move) return -Infinity;
+  const multiplier = getTypeMultiplier(move.type, defender.types);
+  const power = move.power || (move.category === "status" ? 20 : 40);
+  const stab = attacker.types.some((type) => normalizeBattleType(type) === normalizeBattleType(move.type)) ? 1.5 : 1;
+  const accuracy = typeof move.accuracy === "number" ? move.accuracy / 100 : 1;
+  const statusBonus = move.category === "status" ? 0 : 1;
+  return multiplier * power * stab * accuracy * statusBonus;
+};
+const chooseBestBattleMove = (attacker, defender) => {
+  const availableMoves = (attacker.moves || []).filter(Boolean);
+  return availableMoves.sort((a, b) => getBattleMoveScore(b, attacker, defender) - getBattleMoveScore(a, attacker, defender))[0] || availableMoves[0];
+};
+const chooseRandomBattleMoves = async (pokemon, available, amount = 4) => {
+  const candidates = randomItems(available, Math.min(available.length, 48));
+  const loadedMoves = await Promise.all(candidates.map((move) => loadMove(move.url)));
+  const damagingMoves = loadedMoves.filter((move) => move.category !== "status" && move.power);
+  const stabMoves = damagingMoves.filter((move) => pokemon.types?.some((type) => normalizeBattleType(type) === normalizeBattleType(move.type)));
+  const selectedStab = randomItems(stabMoves, Math.min(2, amount));
+  const selectedNames = new Set(selectedStab.map((move) => move.name));
+  const remaining = loadedMoves.filter((move) => !selectedNames.has(move.name));
+  return [...selectedStab, ...randomItems(remaining, amount - selectedStab.length)].slice(0, amount);
+};
 const getStageMultiplier = (stage = 0) => stage >= 0 ? (2 + stage) / 2 : 2 / (2 - stage);
 const applyStatChanges = (boosts, changes) => changes.reduce((next, { stat, change }) => ({ ...next, [stat]: Math.max(-6, Math.min(6, (next[stat] || 0) + change)) }), boosts);
 const getEffectivenessMessage = (multiplier) => multiplier === 0 ? "Não afeta o alvo. (0×)" : multiplier >= 4 ? "É super efetivo! (4×)" : multiplier >= 2 ? "É super efetivo! (2×)" : multiplier < 1 ? `Não é muito eficaz... (${multiplier}×)` : "Efeito neutro (1×).";
@@ -301,10 +429,22 @@ const getDamage = (attacker, move, defender, attackerBoosts = {}, defenderBoosts
   const multiplier = getTypeMultiplier(move.type, defender.types);
   if (multiplier === 0) return 0;
   const baseDamage = Math.floor(Math.floor((Math.floor((2 * level) / 5 + 2) * power * attackStat * getAttackBoost(move, attackerBoosts) / (defenseStat * getDefenseBoost(move, defenderBoosts))) / 50) + 2);
-  const stab = attacker.types.includes(move.type) ? 1.5 : 1;
+  const stab = attacker.types.some((type) => normalizeBattleType(type) === normalizeBattleType(move.type)) ? 1.5 : 1;
   return Math.max(1, Math.floor(baseDamage * stab * multiplier * (0.85 + Math.random() * 0.15)));
 };
-const getNextAvailableIndex = (team, fainted) => team.findIndex((_, index) => !fainted.includes(index));
+const getNextAvailableIndex = (team, fainted, opponent) => {
+  const candidates = team
+    .map((pokemon, index) => ({ pokemon, index }))
+    .filter(({ index }) => !fainted.includes(index));
+  if (!opponent) return candidates[0]?.index ?? -1;
+  return candidates.sort((a, b) => {
+    const threatA = Math.max(...(opponent.moves || []).map((move) => getTypeMultiplier(move.type, a.pokemon.types)), 1);
+    const threatB = Math.max(...(opponent.moves || []).map((move) => getTypeMultiplier(move.type, b.pokemon.types)), 1);
+    const offenseA = Math.max(...(a.pokemon.moves || []).map((move) => getBattleMoveScore(move, a.pokemon, opponent)), 0);
+    const offenseB = Math.max(...(b.pokemon.moves || []).map((move) => getBattleMoveScore(move, b.pokemon, opponent)), 0);
+    return (threatA * 100 - offenseA) - (threatB * 100 - offenseB);
+  })[0]?.index ?? -1;
+};
 
 function App() {
   const [page, setPage] = useState("team");
@@ -313,10 +453,15 @@ function App() {
   const [analysis, setAnalysis] = useState(false);
   const [query, setQuery] = useState("");
   const [pokemonCatalog, setPokemonCatalog] = useState(pokemonList);
+  const [catalogReady, setCatalogReady] = useState(false);
   const [selectedGenerations, setSelectedGenerations] = useState([]);
   const [showGenerations, setShowGenerations] = useState(false);
   const [selectedTypes, setSelectedTypes] = useState([]);
   const [showTypes, setShowTypes] = useState(false);
+  const [showFinalEvolution, setShowFinalEvolution] = useState(false);
+  const [finalEvolutionIds, setFinalEvolutionIds] = useState(() => new Set());
+  const [evolutionLoading, setEvolutionLoading] = useState(false);
+  const checkedEvolutionIds = useRef(new Set());
   const [movesByPokemon, setMovesByPokemon] = useState({});
   const [chosenMoves, setChosenMoves] = useState({});
   const [libraryView, setLibraryView] = useState(null);
@@ -343,6 +488,7 @@ function App() {
         });
         if (cancelled) return;
         setPokemonCatalog(catalog);
+        setCatalogReady(true);
         for (let index = 0; index < catalog.length; index += 20) {
           const batch = catalog.slice(index, index + 20);
           const enriched = await Promise.all(batch.map(async (pokemon) => {
@@ -358,20 +504,69 @@ function App() {
           setPokemonCatalog((current) => current.map((pokemon) => enriched.find((item) => item.id === pokemon.id) || pokemon));
         }
       } catch {
-        if (!cancelled) setPokemonCatalog(pokemonList);
+        if (!cancelled) {
+          setPokemonCatalog(pokemonList);
+          setCatalogReady(true);
+        }
       }
     };
     loadCatalog();
     return () => { cancelled = true; };
   }, []);
+  useEffect(() => {
+    if (!showFinalEvolution || !catalogReady || !pokemonCatalog.length) {
+      if (!showFinalEvolution) {
+        checkedEvolutionIds.current.clear();
+        setFinalEvolutionIds(new Set());
+      }
+      return undefined;
+    }
+    let cancelled = false;
+    const loadEvolutionFlags = async () => {
+      setEvolutionLoading(true);
+      const pending = pokemonCatalog.filter((pokemon) => !checkedEvolutionIds.current.has(pokemon.id));
+      if (!pending.length) {
+        setEvolutionLoading(false);
+        return;
+      }
+      const pendingBases = [...new Map(pending.map((pokemon) => [pokemon.baseId || pokemon.id, pokemon])).values()];
+      const finalIds = new Set();
+      for (let index = 0; index < pendingBases.length; index += 20) {
+        const batch = pendingBases.slice(index, index + 20);
+        const results = await Promise.all(batch.map(async (pokemon) => {
+          try {
+            const basePokemon = pokemon.baseId && pokemon.baseId !== pokemon.id
+              ? pokemonCatalog.find((item) => item.id === pokemon.baseId) || { ...pokemon, id: pokemon.baseId }
+              : pokemon;
+            const baseId = pokemon.baseId || pokemon.id;
+            const relatedIds = pending.filter((item) => (item.baseId || item.id) === baseId).map((item) => item.id);
+            return { id: baseId, relatedIds, final: await isFinalEvolution(basePokemon) };
+          } catch {
+            const baseId = pokemon.baseId || pokemon.id;
+            return { id: baseId, relatedIds: pending.filter((item) => (item.baseId || item.id) === baseId).map((item) => item.id), final: true };
+          }
+        }));
+        if (cancelled) return;
+        results.forEach(({ relatedIds, final }) => {
+          relatedIds.forEach((id) => checkedEvolutionIds.current.add(id));
+          if (final) relatedIds.forEach((id) => finalIds.add(id));
+        });
+        setFinalEvolutionIds((current) => new Set([...current, ...finalIds]));
+      }
+      if (!cancelled) setEvolutionLoading(false);
+    };
+    loadEvolutionFlags();
+    return () => { cancelled = true; };
+  }, [showFinalEvolution, catalogReady]);
   const options = useMemo(
     () =>
       pokemonCatalog.filter((pokemon) =>
         (selectedGenerations.length === 0 || selectedGenerations.includes(getGeneration(pokemon.baseId || pokemon.id))) &&
         (selectedTypes.length === 0 || pokemon.types?.some((type) => selectedTypes.includes(type))) &&
+        (!showFinalEvolution || evolutionLoading || finalEvolutionIds.has(pokemon.id)) &&
         pokemon.name.toLowerCase().includes(query.toLowerCase()),
       ),
-    [pokemonCatalog, query, selectedGenerations, selectedTypes],
+    [pokemonCatalog, query, selectedGenerations, selectedTypes, showFinalEvolution, evolutionLoading, finalEvolutionIds],
   );
   const hydratePokemon = async (pokemon) => {
     if (pokemon.types?.length) return { ...pokemon, types: getCorrectedPokemonTypes(pokemon, pokemon.types) };
@@ -393,8 +588,13 @@ function App() {
     setTeam((current) => current.map((item) => item.id === pokemon.id ? hydrated : item));
   };
   const randomize = async () => {
-    const selected = [...options].sort(() => Math.random() - 0.5).slice(0, 6);
-    setTeam(await Promise.all(selected.map(hydratePokemon)));
+    const emptySlots = 6 - team.length;
+    if (emptySlots <= 0) return;
+    const currentIds = new Set(team.map((pokemon) => pokemon.id));
+    const availableOptions = options.filter((pokemon) => !currentIds.has(pokemon.id));
+    const selected = randomItems(availableOptions, emptySlots);
+    const newPokemon = await Promise.all(selected.map(hydratePokemon));
+    setTeam((current) => [...current, ...newPokemon.filter((pokemon) => !current.some((item) => item.id === pokemon.id))].slice(0, 6));
   };
   const saveCurrentTeam = () => {
     if (!team.length) return;
@@ -433,7 +633,8 @@ function App() {
         </p>
       </div>
       <section className="panel team-panel">
-        <h2 className="team-title">Meu time <button className="save-team-button" onClick={saveCurrentTeam} disabled={!team.length} title="Salvar time completo" aria-label="Salvar time completo">♥</button></h2>
+        <h2>Meu time</h2>
+        <button className="save-team-button" onClick={saveCurrentTeam} disabled={!team.length} title="Salvar time completo" aria-label="Salvar time completo">♥</button>
         <div className="team-slots">
           {Array.from({ length: 6 }, (_, index) => (
             <TeamSlot
@@ -466,6 +667,10 @@ function App() {
           <button className="generation-button" onClick={() => setShowTypes((current) => !current)}>Tipos ▾</button>
           {showTypes && <div className="generation-menu">{allTypes.map((type) => <label key={type}><input type="checkbox" checked={selectedTypes.includes(type)} onChange={() => setSelectedTypes((current) => current.includes(type) ? current.filter((item) => item !== type) : [...current, type])} /> {typeNames[type] || type}</label>)}<small>Nenhuma seleção mostra todos os tipos.</small></div>}
         </div>
+        <div className="generation-filter evolution-filter">
+          <button className={`generation-button ${showFinalEvolution ? "active-filter" : ""}`} onClick={() => setShowFinalEvolution((current) => !current)}>{evolutionLoading ? "Carregando..." : "Evolução ▾"}</button>
+          {showFinalEvolution && <small className="evolution-filter-hint">Apenas última evolução</small>}
+        </div>
         <div className="search-row">
           <input
             value={query}
@@ -492,7 +697,7 @@ function App() {
       </div>
       </div>
       {!libraryView && page === "moves" && <MovesPage team={team} movesByPokemon={movesByPokemon} setMovesByPokemon={setMovesByPokemon} chosenMoves={chosenMoves} setChosenMoves={setChosenMoves} />}
-      {!libraryView && page === "battles" && <BattlesPage team={team} chosenMoves={chosenMoves} pokemonCatalog={pokemonCatalog} />}
+      {!libraryView && page === "battles" && <BattlesPage team={team} chosenMoves={chosenMoves} pokemonCatalog={pokemonCatalog} savedTeams={savedTeams} />}
       <BottomNav page={page} setPage={(nextPage) => { setPage(nextPage); setLibraryView(null); }} />
     </main>
   );
@@ -564,7 +769,7 @@ function MovesPage({ team, movesByPokemon, setMovesByPokemon, chosenMoves, setCh
     if (movesByPokemon[pokemon.id]) return;
     setLoadingPokemon(pokemon.id);
     try {
-      const moves = await loadPokemonMoves(pokemon.id);
+      const moves = await loadPokemonMoves(pokemon.id, pokemon.baseId, pokemon.name);
       setMovesByPokemon((current) => ({ ...current, [pokemon.id]: moves }));
     } catch (requestError) {
       setError(requestError.message);
@@ -595,9 +800,9 @@ function MovesPage({ team, movesByPokemon, setMovesByPokemon, chosenMoves, setCh
     setError("");
     setLoadingMove(`${pokemon.id}-random`);
     try {
-      const available = movesByPokemon[pokemon.id] || await loadPokemonMoves(pokemon.id);
+      const available = movesByPokemon[pokemon.id] || await loadPokemonMoves(pokemon.id, pokemon.baseId, pokemon.name);
       if (!movesByPokemon[pokemon.id]) setMovesByPokemon((current) => ({ ...current, [pokemon.id]: available }));
-      const randomMoves = await Promise.all(randomItems(available, 4).map((move) => loadMove(move.url)));
+      const randomMoves = await chooseRandomBattleMoves(pokemon, available);
       setChosenMoves((current) => ({ ...current, [pokemon.id]: randomMoves }));
       setOpenPokemon(null);
     } catch (requestError) {
@@ -610,15 +815,24 @@ function MovesPage({ team, movesByPokemon, setMovesByPokemon, chosenMoves, setCh
   return <section className="subpage"><div className="subpage-heading"><span className="section-label">Preparação</span><h2>Editar movimentos</h2><p>Monte os quatro golpes de cada Pokémon da sua equipe. Os dados vêm da PokéAPI.</p></div>{error && <div className="api-error">{error}</div>}{team.length ? <div className="moves-list">{team.map((pokemon) => <div className="move-card" key={pokemon.id}><img src={pokemon.image} alt={pokemon.name} /><div><h3>{pokemon.name}</h3><small>{formatTypes(pokemon.types)}</small><button className="card-random-button" onClick={() => randomizeMoves(pokemon)} disabled={loadingMove === `${pokemon.id}-random`}>{loadingMove === `${pokemon.id}-random` ? "Sorteando..." : "🎲 Randomizar golpes"}</button></div><div className="move-slots">{Array.from({ length: 4 }, (_, slot) => { const selected = chosenMoves[pokemon.id]?.[slot]; return <div className="move-slot" key={slot}><button className={selected ? "selected-move" : ""} onClick={() => openMovePicker(pokemon, slot)}>{selected ? <><strong>{selected.name.replaceAll("-", " ")}</strong><small>{moveTypeNames[selected.type] || selected.type} · {categoryNames[selected.category]}</small></> : loadingMove === `${pokemon.id}-${slot}` ? "Carregando..." : "Escolher golpe"}</button>{selected && <p className="move-effect">{selected.effect}</p>}{openPokemon === pokemon.id && activeSlot === slot && <div className="move-picker"><input autoFocus value={moveFilter} placeholder="Filtrar golpes..." onChange={(event) => setMoveFilter(event.target.value.toLowerCase())} />{loadingPokemon === pokemon.id ? <span>Buscando golpes...</span> : <>{(movesByPokemon[pokemon.id] || []).filter((move) => move.name.includes(moveFilter)).slice(0, 80).map((move) => <button key={move.name} onClick={() => chooseMove(pokemon, slot, move)}>{move.name.replaceAll("-", " ")}</button>)}<button className="random-move-button" onClick={() => randomizeMoves(pokemon)} disabled={loadingMove === `${pokemon.id}-random`}>{loadingMove === `${pokemon.id}-random` ? "Sorteando..." : "🎲 Randomizar golpes"}</button></>}</div>}</div>; })}</div></div>)}</div> : <EmptyPage text="Adicione Pokémon ao seu time para editar os movimentos." />}</section>;
 }
 
-function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
+function BattlesPage({ team, chosenMoves, pokemonCatalog, savedTeams }) {
+  const [arenaMode, setArenaMode] = useState(null);
   const [tournament, setTournament] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [activeBattle, setActiveBattle] = useState(null);
   const [battleLoading, setBattleLoading] = useState(false);
   const [reviewMode, setReviewMode] = useState(false);
+  const [tournamentSize, setTournamentSize] = useState(8);
+  const [directPlayerSource, setDirectPlayerSource] = useState("current");
+  const [directEnemySource, setDirectEnemySource] = useState("current");
+  const [directPlayerName, setDirectPlayerName] = useState("Treinador 1");
+  const [directEnemyName, setDirectEnemyName] = useState("Treinador 2");
+  const [directCustomTeams, setDirectCustomTeams] = useState({ player: [], enemy: [] });
+  const [directBuilderSide, setDirectBuilderSide] = useState("player");
+  const [directBuilderQuery, setDirectBuilderQuery] = useState("");
 
-  const startTournament = async () => {
+  const startTournament = async (asReview = false) => {
     setLoading(true);
     setError("");
     try {
@@ -626,16 +840,18 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
         const pokemonData = await loadPokemonData(pokemon.id);
         let moves = chosenMoves[pokemon.id] || [];
         if (!moves.length) {
-          const available = await loadPokemonMoves(pokemon.id);
-          moves = await Promise.all(randomItems(available, 4).map((move) => loadMove(move.url)));
+          const available = await loadPokemonMoves(pokemon.id, pokemon.baseId, pokemon.name);
+          moves = await chooseRandomBattleMoves(pokemon, available);
         }
         return { ...pokemon, level: 100, stats: getPokemonStats(pokemonData), moves };
       }));
-      const names = randomItems(trainerNames, 7);
-      const availableTrainerSprites = randomItems(await loadTrainerSpritePool(), 8);
+      const opponentCount = tournamentSize - 1;
+      const names = buildTrainerNames(opponentCount);
+      const availableTrainerSprites = randomItems(await loadTrainerSpritePool(), tournamentSize);
       const opponents = await Promise.all(names.map((name, index) => createRandomOpponent(name, `opponent-${index}`, availableTrainerSprites[index + 1] || trainerSprites[index % trainerSprites.length], pokemonCatalog)));
-      const trainers = randomItems([{ id: "user", name: "Você", isUser: true, trainerSprite: availableTrainerSprites[0] || trainerSprites[0], team: userTeam }, ...opponents], 8);
+      const trainers = [{ id: "user", name: "Você", isUser: true, trainerSprite: availableTrainerSprites[0] || trainerSprites[0], team: userTeam }, ...opponents];
       setTournament({ rounds: [createMatches(trainers)], currentRound: 0, champion: null, eliminated: false });
+      setReviewMode(asReview);
     } catch (requestError) {
       setError(`Não foi possível preparar o torneio: ${requestError.message}`);
     } finally {
@@ -644,9 +860,9 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
   };
 
   const simulateRound = () => {
-    if (!tournament || tournament.champion || tournament.eliminated) return;
+    if (!tournament || tournament.champion || (tournament.eliminated && !reviewMode)) return;
     const currentMatches = tournament.rounds[tournament.currentRound];
-    if (currentMatches.some((match) => !match.winner && (match.a.isUser || match.b.isUser))) {
+    if (!reviewMode && currentMatches.some((match) => !match.winner && (match.a.isUser || match.b.isUser))) {
       setError("Entre na sua batalha antes de avançar a rodada.");
       return;
     }
@@ -669,11 +885,11 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
   };
 
   const simulateOneMatch = () => {
-    if (!tournament || tournament.champion || tournament.eliminated) return;
+    if (!tournament || tournament.champion || (tournament.eliminated && !reviewMode)) return;
     const currentMatches = tournament.rounds[tournament.currentRound];
-    const target = currentMatches.find((match) => !match.winner && !match.a.isUser && !match.b.isUser);
+    const target = currentMatches.find((match) => !match.winner && (reviewMode || (!match.a.isUser && !match.b.isUser)));
     if (!target) {
-      setError("Não há uma luta de IA disponível nesta rodada.");
+      setError(reviewMode ? "Não há uma luta disponível nesta rodada." : "Não há uma luta de IA disponível nesta rodada.");
       return;
     }
     const winner = Math.random() < calculateTeamPower(target.a) / (calculateTeamPower(target.a) + calculateTeamPower(target.b)) ? target.a : target.b;
@@ -693,10 +909,10 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
   };
 
   const reviewNextMatch = () => {
-    if (!tournament || activeBattle || tournament.champion || tournament.eliminated) return;
-    const match = (tournament.rounds[tournament.currentRound] || []).find((item) => !item.winner && !item.a.isUser && !item.b.isUser);
+    if (!tournament || activeBattle || tournament.champion || (tournament.eliminated && !reviewMode)) return;
+    const match = (tournament.rounds[tournament.currentRound] || []).find((item) => !item.winner && (reviewMode || (!item.a.isUser && !item.b.isUser)));
     if (!match) {
-      setError("Não há uma luta de IA disponível para revisar nesta rodada.");
+      setError(reviewMode ? "Não há uma luta disponível para revisar nesta rodada." : "Não há uma luta de IA disponível para revisar nesta rodada.");
       return;
     }
     beginReviewBattle(match);
@@ -710,10 +926,17 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
     try {
       const enrichTrainer = async (trainer) => ({
         ...trainer,
-        team: await Promise.all(trainer.team.map(async (pokemon) => ({
-          ...pokemon,
-          moves: await Promise.all(pokemon.moves.map((move) => move.url ? loadMove(move.url) : Promise.resolve(move))),
-        }))),
+        team: await Promise.all(trainer.team.map(async (pokemon) => {
+          const data = await loadPokemonData(pokemon.id);
+          let moves = pokemon.moves || [];
+          if (!moves.length) {
+            const available = await loadPokemonMoves(pokemon.id, pokemon.baseId, pokemon.name);
+            moves = await chooseRandomBattleMoves(pokemon, available);
+          } else {
+            moves = await Promise.all(moves.map((move) => move.url ? loadMove(move.url) : Promise.resolve(move)));
+          }
+          return { ...pokemon, level: 100, stats: pokemon.stats || getPokemonStats(data), moves };
+        })),
       });
       const [enrichedPlayer, enrichedEnemy, battleApiSnapshot] = await Promise.all([enrichTrainer(player), enrichTrainer(enemy), loadBattleApiSnapshot()]);
       const playerPokemon = enrichedPlayer.team[0];
@@ -754,10 +977,17 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
     try {
       const enrichTrainer = async (trainer) => ({
         ...trainer,
-        team: await Promise.all(trainer.team.map(async (pokemon) => ({
-          ...pokemon,
-          moves: await Promise.all(pokemon.moves.map((move) => move.url ? loadMove(move.url) : Promise.resolve(move))),
-        }))),
+        team: await Promise.all(trainer.team.map(async (pokemon) => {
+          const data = await loadPokemonData(pokemon.id);
+          let moves = pokemon.moves || [];
+          if (!moves.length) {
+            const available = await loadPokemonMoves(pokemon.id, pokemon.baseId, pokemon.name);
+            moves = await chooseRandomBattleMoves(pokemon, available);
+          } else {
+            moves = await Promise.all(moves.map((move) => move.url ? loadMove(move.url) : Promise.resolve(move)));
+          }
+          return { ...pokemon, level: 100, stats: pokemon.stats || getPokemonStats(data), moves };
+        })),
       });
       const [player, enemy] = await Promise.all([enrichTrainer(match.a), enrichTrainer(match.b)]);
       const playerPokemon = player.team[0];
@@ -796,9 +1026,31 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
     setTournament((current) => {
       if (!current) return current;
       const rounds = current.rounds.map((round, index) => index === current.currentRound ? round.map((match) => match.id === activeBattle.matchId ? { ...match, winner } : match) : round);
-      return { ...current, rounds, eliminated: activeBattle.review ? current.eliminated : !winner.isUser && winner.id !== "user" };
+      return { ...current, rounds, eliminated: activeBattle.review ? false : !winner.isUser && winner.id !== "user" };
     });
     setActiveBattle(null);
+  };
+
+  const getDirectTeam = (source, side) => source === "current"
+    ? team
+    : source === "build"
+      ? directCustomTeams[side]
+      : savedTeams.find((savedTeam) => String(savedTeam.id) === source)?.team || [];
+
+  const startDirectBattle = async (watchOnly = false) => {
+    const playerTeam = getDirectTeam(directPlayerSource, "player");
+    const enemyTeam = getDirectTeam(directEnemySource, "enemy");
+    if (!playerTeam.length || !enemyTeam.length) {
+      setError("Escolha dois times antes de iniciar a batalha.");
+      return;
+    }
+    const match = {
+      id: `direct-${Date.now()}`,
+      a: { id: "direct-player", name: directPlayerName.trim() || "Treinador 1", isUser: true, trainerSprite: trainerSprites[0], team: playerTeam },
+      b: { id: "direct-enemy", name: directEnemyName.trim() || "Treinador 2", trainerSprite: trainerSprites[1], team: enemyTeam },
+    };
+    if (watchOnly) await beginReviewBattle(match);
+    else await beginBattle(match);
   };
 
   const playMove = (move) => {
@@ -809,9 +1061,9 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
     enemyPokemon.status = activeBattle.enemyStatuses[activeBattle.enemyIndex] || emptyStatus();
     const playerSpeed = getBattleStat(playerPokemon, "speed") * (playerPokemon.status.condition === "par" ? 0.5 : 1) * getStageMultiplier((activeBattle.playerBoosts[activeBattle.playerIndex] || {}).speed);
     const enemySpeed = getBattleStat(enemyPokemon, "speed") * (enemyPokemon.status.condition === "par" ? 0.5 : 1) * getStageMultiplier((activeBattle.enemyBoosts[activeBattle.enemyIndex] || {}).speed);
-    const enemyMove = randomItems(enemyPokemon.moves, 1)[0];
+    const enemyMove = chooseBestBattleMove(enemyPokemon, playerPokemon);
     const actions = playerSpeed >= enemySpeed ? [{ side: "player", move }, { side: "enemy", move: enemyMove }] : [{ side: "enemy", move: enemyMove }, { side: "player", move }];
-    let next = { ...activeBattle, turn: (activeBattle.turn || 0) + 1, resolving: true, animations: actions.map((action, index) => ({ id: `${activeBattle.turn}-${index}-${action.move.name}`, side: action.side, type: action.move.type, asset: attackEffectAssets[action.move.type], symbol: animationSymbols[action.move.type] || "✦" })), log: [...activeBattle.log, `--- Turno ${(activeBattle.turn || 0) + 1} ---`], playerBoosts: { ...activeBattle.playerBoosts }, enemyBoosts: { ...activeBattle.enemyBoosts }, playerStatuses: { ...activeBattle.playerStatuses }, enemyStatuses: { ...activeBattle.enemyStatuses } };
+    let next = { ...activeBattle, turn: (activeBattle.turn || 0) + 1, resolving: true, animations: actions.map((action, index) => ({ id: `${activeBattle.turn}-${index}-${action.move.name}`, side: action.side, type: action.move.type, asset: getAttackEffectAsset(action.move), symbol: animationSymbols[action.move.type] || "✦" })), log: [...activeBattle.log, `--- Turno ${(activeBattle.turn || 0) + 1} ---`], playerBoosts: { ...activeBattle.playerBoosts }, enemyBoosts: { ...activeBattle.enemyBoosts }, playerStatuses: { ...activeBattle.playerStatuses }, enemyStatuses: { ...activeBattle.enemyStatuses } };
 
     for (const action of actions) {
       const attacker = action.side === "player" ? next.player.team[next.playerIndex] : next.enemy.team[next.enemyIndex];
@@ -898,7 +1150,12 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
           finishBattle(side === "enemy" ? next.player : next.enemy);
           return;
         }
-        const nextIndex = getNextAvailableIndex(targetTeam, fainted);
+        if (side === "player" && !next.review) {
+          setActiveBattle((current) => ({ ...current, resolving: false }));
+          return;
+        }
+        const opponent = side === "enemy" ? next.player.team[next.playerIndex] : next.enemy.team[next.enemyIndex];
+        const nextIndex = getNextAvailableIndex(targetTeam, fainted, opponent);
         const nextPokemon = targetTeam[nextIndex];
         setActiveBattle((current) => ({ ...current, resolving: false, pendingReplacement: null, ...(side === "enemy" ? { enemyIndex: nextIndex, enemyHp: getMaxHp(nextPokemon), enemyBoosts: { ...current.enemyBoosts, [nextIndex]: {} }, enemyStatuses: { ...current.enemyStatuses, [nextIndex]: emptyStatus() } } : { playerIndex: nextIndex, playerHp: getMaxHp(nextPokemon), playerBoosts: { ...current.playerBoosts, [nextIndex]: {} }, playerStatuses: { ...current.playerStatuses, [nextIndex]: emptyStatus() } }), log: [...current.log, `${nextPokemon.name} entrou na batalha!`] }));
         return;
@@ -911,26 +1168,41 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
     if (!activeBattle?.review || activeBattle.resolving || activeBattle.finished) return undefined;
     const timer = window.setTimeout(() => {
       const pokemon = activeBattle.player.team[activeBattle.playerIndex];
-      const move = randomItems(pokemon.moves, 1)[0];
+      const opponent = activeBattle.enemy.team[activeBattle.enemyIndex];
+      const move = chooseBestBattleMove(pokemon, opponent);
       if (move) playMove(move);
     }, 850);
     return () => window.clearTimeout(timer);
   }, [activeBattle]);
 
   const switchPokemon = (nextIndex) => {
-    if (!activeBattle || activeBattle.resolving || activeBattle.playerSwitchTokens < 1 || nextIndex === activeBattle.playerIndex || activeBattle.faintedPlayer.includes(nextIndex)) return;
+    const forcedReplacement = activeBattle?.pendingReplacement?.side === "player";
+    if (!activeBattle || (activeBattle.resolving && !forcedReplacement) || (!forcedReplacement && activeBattle.playerSwitchTokens < 1) || nextIndex === activeBattle.playerIndex || activeBattle.faintedPlayer.includes(nextIndex)) return;
     const nextPokemon = activeBattle.player.team[nextIndex];
+    if (forcedReplacement) {
+      setActiveBattle({
+        ...activeBattle,
+        playerIndex: nextIndex,
+        playerHp: getMaxHp(nextPokemon),
+        playerBoosts: { ...activeBattle.playerBoosts, [nextIndex]: {} },
+        playerStatuses: { ...activeBattle.playerStatuses, [nextIndex]: emptyStatus() },
+        pendingReplacement: null,
+        resolving: false,
+        log: [...activeBattle.log, `${nextPokemon.name} entrou na batalha!`],
+      });
+      return;
+    }
     const enemyPokemon = activeBattle.enemy.team[activeBattle.enemyIndex];
     nextPokemon.status = activeBattle.playerStatuses[nextIndex] || emptyStatus();
     enemyPokemon.status = activeBattle.enemyStatuses[activeBattle.enemyIndex] || emptyStatus();
-    const enemyMove = randomItems(enemyPokemon.moves, 1)[0];
+    const enemyMove = chooseBestBattleMove(enemyPokemon, nextPokemon);
     const enemyBoost = activeBattle.enemyBoosts[activeBattle.enemyIndex] || {};
     const damage = getDamage(enemyPokemon, enemyMove, nextPokemon, enemyBoost, activeBattle.playerBoosts[nextIndex] || {});
     const playerHp = Math.max(0, getMaxHp(nextPokemon) - damage);
     const enemyBoosts = { ...activeBattle.enemyBoosts, [activeBattle.enemyIndex]: applyStatChanges(enemyBoost, enemyMove.statChanges) };
     const playerStatuses = { ...activeBattle.playerStatuses, [nextIndex]: applyMoveStatus(activeBattle.playerStatuses[nextIndex] || emptyStatus(), enemyMove) };
     const log = [...activeBattle.log, `--- Turno ${(activeBattle.turn || 0) + 1} ---`, `Você trocou para ${nextPokemon.name}.`, `Adversário: ${enemyPokemon.name} usou ${moveLabel(enemyMove)} e causou ${damage} de dano.`, getEffectivenessMessage(getTypeMultiplier(enemyMove.type, nextPokemon.types))];
-    const animations = [{ id: `${activeBattle.turn}-switch-${enemyMove.name}`, side: "enemy", type: enemyMove.type, asset: attackEffectAssets[enemyMove.type], symbol: animationSymbols[enemyMove.type] || "✦" }];
+    const animations = [{ id: `${activeBattle.turn}-switch-${enemyMove.name}`, side: "enemy", type: enemyMove.type, asset: getAttackEffectAsset(enemyMove), symbol: animationSymbols[enemyMove.type] || "✦" }];
     if (enemyMove.statChanges.length) log.push(`${enemyPokemon.name}: ${formatBoosts(enemyBoosts[activeBattle.enemyIndex]).join(", ") || "atributos alterados"}.`);
     if (playerHp === 0) {
       const faintedPlayer = [...activeBattle.faintedPlayer, nextIndex];
@@ -939,13 +1211,64 @@ function BattlesPage({ team, chosenMoves, pokemonCatalog }) {
         finishBattle(activeBattle.enemy);
         return;
       }
-      const fallbackIndex = getNextAvailableIndex(activeBattle.player.team, faintedPlayer);
+      const fallbackIndex = getNextAvailableIndex(activeBattle.player.team, faintedPlayer, enemyPokemon);
       const fallbackPokemon = activeBattle.player.team[fallbackIndex];
       setActiveBattle({ ...activeBattle, turn: (activeBattle.turn || 0) + 1, animations, playerIndex: fallbackIndex, playerHp: getMaxHp(fallbackPokemon), faintedPlayer, enemyBoosts, playerStatuses, playerSwitchTokens: activeBattle.playerSwitchTokens - 1, log: [...log, `${fallbackPokemon.name} entrou na batalha!`] });
       return;
     }
     setActiveBattle({ ...activeBattle, turn: (activeBattle.turn || 0) + 1, animations, playerIndex: nextIndex, playerHp, enemyBoosts, playerStatuses, playerSwitchTokens: activeBattle.playerSwitchTokens - 1, log: [...log, `Trocas disponíveis restantes: ${activeBattle.playerSwitchTokens - 1}.`] });
   };
+
+  if (!arenaMode) {
+    return <section className="subpage arena-mode-page">
+      <div className="subpage-heading"><span className="section-label">Arena</span><h2>Torneio Pokémon</h2><p>Escolha como você quer jogar antes de entrar na arena.</p></div>
+      {!team.length && <div className="api-error">Monte ou carregue um time antes de começar.</div>}
+      <div className="arena-mode-grid">
+        <button className="arena-mode-card" onClick={() => setArenaMode("competition")} disabled={!team.length}><span className="arena-mode-icon">🏆</span><strong>Competição</strong><small>Jogue com o time selecionado e avance pelas rodadas do torneio.</small></button>
+        <button className="arena-mode-card" onClick={() => setArenaMode("review")} disabled={!team.length}><span className="arena-mode-icon">▶</span><strong>Review / Replay</strong><small>Apenas assista às lutas e simule todas ou uma luta por vez.</small></button>
+        <button className="arena-mode-card" onClick={() => setArenaMode("battle")} disabled={!team.length}><span className="arena-mode-icon">⚔</span><strong>Batalha</strong><small>Escolha dois times e acompanhe uma batalha individual.</small></button>
+      </div>
+    </section>;
+  }
+
+  if (arenaMode === "battle") {
+    const builderTeam = directCustomTeams[directBuilderSide];
+    const builderOptions = pokemonCatalog
+      .filter((pokemon) => pokemon.name.toLowerCase().includes(directBuilderQuery.toLowerCase()))
+      .slice(0, 48);
+    const toggleDirectPokemon = (pokemon) => setDirectCustomTeams((current) => {
+      const selected = current[directBuilderSide];
+      const exists = selected.some((item) => item.id === pokemon.id);
+      if (exists) return { ...current, [directBuilderSide]: selected.filter((item) => item.id !== pokemon.id) };
+      if (selected.length >= 6) return current;
+      return { ...current, [directBuilderSide]: [...selected, pokemon] };
+    });
+    const sourceNeedsTeam = (source, side) => source === "build" ? directCustomTeams[side].length === 0 : false;
+    return <section className="subpage">
+      <div className="subpage-heading"><span className="section-label">Arena</span><h2>Batalha individual</h2><p>Escolha os dois times e acompanhe uma batalha.</p></div>
+      {error && <div className="api-error">{error}</div>}
+      <button className="arena-back-button" onClick={() => { setArenaMode(null); setActiveBattle(null); }}>← Escolher outro modo</button>
+      <div className="direct-battle-setup"><h3>Escolha os treinadores</h3><div className="direct-battle-fields">
+        <label>Nome do Treinador 1<input value={directPlayerName} onChange={(event) => setDirectPlayerName(event.target.value)} maxLength={24} placeholder="Nome do treinador" /></label>
+        <label>Nome do Treinador 2<input value={directEnemyName} onChange={(event) => setDirectEnemyName(event.target.value)} maxLength={24} placeholder="Nome do treinador" /></label>
+        <label>Time do Treinador 1<select value={directPlayerSource} onChange={(event) => setDirectPlayerSource(event.target.value)}><option value="current">Meu time atual</option><option value="build">Montar time nesta página</option>{savedTeams.map((savedTeam) => <option key={savedTeam.id} value={savedTeam.id}>{savedTeam.name}</option>)}</select></label>
+        <label>Time do Treinador 2<select value={directEnemySource} onChange={(event) => setDirectEnemySource(event.target.value)}><option value="current">Meu time atual</option><option value="build">Montar time nesta página</option>{savedTeams.map((savedTeam) => <option key={savedTeam.id} value={savedTeam.id}>{savedTeam.name}</option>)}</select></label>
+      </div>{(directPlayerSource === "build" || directEnemySource === "build") && <div className="direct-builder"><div className="direct-builder-tabs"><button className={directBuilderSide === "player" ? "active" : ""} onClick={() => setDirectBuilderSide("player")}>Time do Treinador 1 ({directCustomTeams.player.length}/6)</button><button className={directBuilderSide === "enemy" ? "active" : ""} onClick={() => setDirectBuilderSide("enemy")}>Time do Treinador 2 ({directCustomTeams.enemy.length}/6)</button></div><input value={directBuilderQuery} onChange={(event) => setDirectBuilderQuery(event.target.value)} placeholder="Buscar Pokémon para montar o time..." /><div className="direct-builder-selected">{builderTeam.length ? builderTeam.map((pokemon) => <button key={pokemon.id} onClick={() => toggleDirectPokemon(pokemon)}>{pokemon.name} ×</button>) : <small>Escolha até seis Pokémon abaixo.</small>}</div><div className="direct-builder-grid">{builderOptions.map((pokemon) => <button className={builderTeam.some((item) => item.id === pokemon.id) ? "selected" : ""} key={pokemon.id} onClick={() => toggleDirectPokemon(pokemon)}><img src={pokemon.image} alt="" /><span>{pokemon.name}</span></button>)}</div></div>}<div className="direct-battle-actions"><button className="battle-button" onClick={() => startDirectBattle(false)} disabled={battleLoading || Boolean(activeBattle) || sourceNeedsTeam(directPlayerSource, "player") || sourceNeedsTeam(directEnemySource, "enemy")}>{battleLoading ? "Preparando batalha..." : "Começar batalha"}</button><button className="secondary-button" onClick={() => startDirectBattle(true)} disabled={battleLoading || Boolean(activeBattle) || sourceNeedsTeam(directPlayerSource, "player") || sourceNeedsTeam(directEnemySource, "enemy")}>{battleLoading ? "Preparando..." : "Assistir review"}</button></div></div>
+      {activeBattle && <BattleArena battle={activeBattle} onMove={playMove} onSwitch={switchPokemon} />}
+    </section>;
+  }
+
+  if (arenaMode === "competition" || arenaMode === "review") {
+    const roundNames = ["Quartas de final", "Semifinais", "Grande final"];
+    const currentMatches = tournament?.rounds[tournament.currentRound] || [];
+    const roundTitle = tournament?.champion ? "Torneio encerrado" : tournament?.eliminated ? "Você foi eliminado" : roundNames[tournament?.currentRound] || `Rodada ${Number(tournament?.currentRound || 0) + 1}`;
+    return <section className="subpage">
+      <div className="subpage-heading"><span className="section-label">Arena</span><h2>{arenaMode === "review" ? "Review / Replay" : "Torneio Pokémon"}</h2><p>{arenaMode === "review" ? "Assista às lutas e controle o ritmo da competição." : "Compita com seu time e avance pela chave."}</p></div>
+      {error && <div className="api-error">{error}</div>}
+      <button className="arena-back-button" onClick={() => { setArenaMode(null); setTournament(null); setActiveBattle(null); }}>← Escolher outro modo</button>
+      {!tournament && <div className="tournament-size-control"><label>Número de treinadores<select value={tournamentSize} onChange={(event) => setTournamentSize(Number(event.target.value))}>{tournamentSizes.map((size) => <option key={size} value={size}>{size} treinadores</option>)}</select></label><small>{tournamentSize - 1} adversários serão criados automaticamente.</small></div>}
+      {!team.length ? <EmptyPage text="Adicione Pokémon ao seu time antes de entrar no torneio." /> : <><div className="tournament-actions"><button className="battle-button" onClick={() => startTournament(arenaMode === "review")} disabled={loading || battleLoading}>{loading ? "Montando torneio..." : tournament ? "Novo torneio" : arenaMode === "review" ? "Montar review" : "Montar torneio"}</button>{tournament && !tournament.champion && (!tournament.eliminated || arenaMode === "review") && <><button className="secondary-button" onClick={() => setReviewMode((current) => !current)}>{reviewMode ? "Sair do modo review" : "Modo review"}</button><button className="secondary-button" onClick={simulateRound}>Simular todas</button><button className="secondary-button" onClick={simulateOneMatch}>Simular uma</button>{reviewMode && <button className="secondary-button" onClick={reviewNextMatch}>Ver próxima luta</button>}</>}</div>{battleLoading && <div className="loading-card">Carregando os golpes da batalha...</div>}{activeBattle && <BattleArena battle={activeBattle} onMove={playMove} onSwitch={switchPokemon} />}{tournament && !activeBattle && <><div className="round-title"><span>{roundTitle}</span><small>{tournament.champion ? `Campeão: ${tournament.champion.name}` : `${currentMatches.length} batalha(s)`}</small></div><div className="tournament-grid">{currentMatches.map((match) => <TournamentMatch key={match.id} match={match} onBattle={beginBattle} reviewMode={reviewMode} onReview={beginReviewBattle} />)}</div>{tournament.champion && <div className="champion-card"><img src={showdownTrainerSprite(tournament.champion.trainerSprite)} alt={tournament.champion.name} /><div><strong>🏆 {tournament.champion.name} venceu o torneio!</strong><span>Equipe vencedora</span><div className="champion-team">{tournament.champion.team.map((pokemon) => <img key={pokemon.id} src={pokemon.image || showdownPokemonSprite(pokemon)} alt={pokemon.name} title={pokemon.name} />)}</div></div></div>}{tournament.eliminated && arenaMode !== "review" && <div className="elimination-card">Seu time foi derrotado. Monte um novo torneio para tentar novamente.</div>}</>}</>}</section>;
+  }
 
   const roundNames = ["Quartas de final", "Semifinais", "Grande final"];
   const currentMatches = tournament?.rounds[tournament.currentRound] || [];
@@ -985,30 +1308,28 @@ function BattleArena({ battle, onMove, onSwitch }) {
   const enemyPokemon = battle.enemy.team[battle.enemyIndex];
   const playerMaxHp = getMaxHp(playerPokemon);
   const enemyMaxHp = getMaxHp(enemyPokemon);
+  const forcedReplacement = battle.pendingReplacement?.side === "player";
   const hpPercent = (value, max) => `${Math.max(0, Math.round((value / max) * 100))}%`;
   const hpState = (value, max) => value / max <= 0.2 ? "critical" : value / max <= 0.5 ? "warning" : "healthy";
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [battle.log.length]);
-  useEffect(() => setMenu("main"), [battle.turn]);
+  useEffect(() => setMenu(forcedReplacement ? "pokemon" : "main"), [battle.turn, forcedReplacement]);
   const selectMove = (move) => { setMenu("main"); onMove(move); };
   const selectPokemon = (index) => { setMenu("main"); onSwitch(index); };
   const renderMoveMenu = () => <div className="classic-move-menu"><div className="move-menu-title">Escolha um golpe</div><div className="classic-move-grid">{playerPokemon.moves.map((move) => <button key={move.id || move.name} onClick={() => selectMove(move)}><MoveArtwork move={move} /><span className="move-button-copy"><strong>{moveLabel(move)}</strong><small>{moveTypeNames[move.type] || move.type} · {categoryNames[move.category]} · PP {move.pp || "—"}</small></span></button>)}</div><button className="classic-back" onClick={() => setMenu("main")}>VOLTAR</button></div>;
-  const renderPokemonMenu = () => <div className="classic-pokemon-menu"><div className="move-menu-title">Escolha um Pokémon <small>Trocas disponíveis: {battle.playerSwitchTokens}</small></div><div className="classic-pokemon-grid">{battle.player.team.map((pokemon, index) => <button key={pokemon.id} disabled={battle.playerSwitchTokens < 1 || index === battle.playerIndex || battle.faintedPlayer.includes(index)} onClick={() => selectPokemon(index)}><img src={pokemon.image} alt="" /><span>{pokemon.name}</span><small>{index === battle.playerIndex ? "EM CAMPO" : battle.faintedPlayer.includes(index) ? "DESMAIADO" : battle.playerSwitchTokens < 1 ? "AGUARDE 2 KOs" : "DISPONÍVEL"}</small></button>)}</div><button className="classic-back" onClick={() => setMenu("main")}>VOLTAR</button></div>;
+  const renderPokemonMenu = () => <div className="classic-pokemon-menu"><div className="move-menu-title">{forcedReplacement ? "Escolha o Pokémon que entrará" : "Escolha um Pokémon"} <small>{forcedReplacement ? "Substituição obrigatória" : `Trocas disponíveis: ${battle.playerSwitchTokens}`}</small></div><div className="classic-pokemon-grid">{battle.player.team.map((pokemon, index) => <button key={pokemon.id} disabled={(!forcedReplacement && battle.playerSwitchTokens < 1) || index === battle.playerIndex || battle.faintedPlayer.includes(index)} onClick={() => selectPokemon(index)}><img src={pokemon.image} alt="" /><span>{pokemon.name}</span><small>{index === battle.playerIndex ? "EM CAMPO" : battle.faintedPlayer.includes(index) ? "DESMAIADO" : !forcedReplacement && battle.playerSwitchTokens < 1 ? "AGUARDE 2 KOs" : "DISPONÍVEL"}</small></button>)}</div>{!forcedReplacement && <button className="classic-back" onClick={() => setMenu("main")}>VOLTAR</button>}</div>;
   const controls = battle.review
     ? <div className="classic-command"><div className="classic-prompt">Revisão automática: as duas IAs estão batalhando...</div></div>
+    : forcedReplacement ? renderPokemonMenu()
     : <>{menu === "main" && <div className="classic-command"><div className="classic-prompt">{battle.resolving ? "Aguarde o resultado..." : `O que ${playerPokemon.name} fará?`}</div><button disabled={battle.resolving} onClick={() => setMenu("fight")}>FIGHT</button><button disabled={battle.resolving} onClick={() => setMenu("pokemon")}>POKÉMON</button></div>}{menu === "fight" && renderMoveMenu()}{menu === "pokemon" && renderPokemonMenu()}{menu !== "pokemon" && <div className="classic-switch-row"><strong>Switch · {battle.playerSwitchTokens} disponível(is)</strong><div>{battle.player.team.map((pokemon, index) => <button key={pokemon.id} disabled={battle.resolving || battle.playerSwitchTokens < 1 || index === battle.playerIndex || battle.faintedPlayer.includes(index)} onClick={() => selectPokemon(index)}><img src={pokemon.image} alt="" /><span>{pokemon.name}</span></button>)}</div></div>}</>;
   return <div className="battle-arena"><div className="battle-header"><span>{battle.player.name}<TeamIndicators team={battle.player.team} fainted={battle.faintedPlayer} current={battle.playerIndex} /></span><strong>VS</strong><span><TeamIndicators team={battle.enemy.team} fainted={battle.faintedEnemy} current={battle.enemyIndex} />{battle.enemy.name}</span></div><div className="battle-layout"><div className="battle-left"><div className="battle-field"><div className={`battle-side enemy-side ${battle.pendingReplacement?.side === "enemy" ? "fainted-side" : ""}`}><div className="battle-status"><strong>{enemyPokemon.name}</strong><StatusDisplay status={battle.enemyStatuses[ battle.enemyIndex ]} /><span>Lv {enemyPokemon.level || 100}</span><span>HP {battle.enemyHp}/{enemyMaxHp}</span><div className="hp-track"><i className={hpState(battle.enemyHp, enemyMaxHp)} style={{ width: hpPercent(battle.enemyHp, enemyMaxHp) }} /></div><BoostDisplay boosts={battle.enemyBoosts[ battle.enemyIndex ]} /></div><BattleSprite pokemon={enemyPokemon} enemy /></div><div className={`battle-side player-side ${battle.pendingReplacement?.side === "player" ? "fainted-side" : ""}`}><BattleSprite pokemon={playerPokemon} /><div className="battle-status"><strong>{playerPokemon.name}</strong><StatusDisplay status={battle.playerStatuses[ battle.playerIndex ]} /><span>Lv {playerPokemon.level || 100}</span><span>HP {battle.playerHp}/{playerMaxHp}</span><div className="hp-track"><i className={hpState(battle.playerHp, playerMaxHp)} style={{ width: hpPercent(battle.playerHp, playerMaxHp) }} /></div><BoostDisplay boosts={battle.playerBoosts[ battle.playerIndex ]} /></div></div>{(battle.animations || []).map((animation, index) => <div className={`battle-fx ${animation.side} type-${animation.type}`} style={{ animationDelay: `${index * 380}ms` }} key={animation.id}>{animation.asset ? <img src={animation.asset} alt="" /> : <span>{animation.symbol}</span>}</div>)}</div><div className="classic-controls">{controls}</div></div><aside className="battle-log-side"><div className="trainer-rail"><div><img src={showdownTrainerSprite(battle.enemy.trainerSprite)} alt="" /><small>{battle.enemy.name}</small></div><div><img src={showdownTrainerSprite(battle.player.trainerSprite)} alt="" /><small>{battle.player.name}</small></div></div><div className="battle-log" ref={logRef}>{battle.log.map((line, index) => <p className={line.startsWith("---") ? "turn-divider" : ""} key={`${line}-${index}`}>{line}</p>)}</div></aside></div></div>;
 }
 
 function TournamentMatch({ match, onBattle, reviewMode, onReview }) {
   const trainer = (candidate) => <div className={`trainer ${match.winner?.id === candidate.id ? "winner" : ""}`}><div className="trainer-heading"><strong>{candidate.name}{candidate.isUser ? " (você)" : ""}</strong><small>{candidate.team.length} Pokémon</small></div><div className="fighter-list">{candidate.team.map((pokemon) => <div key={pokemon.id}><img src={pokemon.image} alt="" /><span>{pokemon.name}<small>{pokemon.moves.slice(0, 4).map(moveLabel).join(", ")}</small></span></div>)}</div></div>;
-  return <article className="tournament-match">{trainer(match.a)}<div className="versus">VS</div>{trainer(match.b)}{match.winner ? <div className="match-result">Vencedor: {match.winner.name}</div> : (match.a.isUser || match.b.isUser) ? reviewMode ? <div className="match-result">Luta do jogador — indisponível no review</div> : <button className="match-battle-button" onClick={() => onBattle(match)}>Batalhar</button> : reviewMode && <button className="match-battle-button" onClick={() => onReview(match)}>Revisar luta</button>}</article>;
+  return <article className="tournament-match">{trainer(match.a)}<div className="versus">VS</div>{trainer(match.b)}{match.winner ? <div className="match-result">Vencedor: {match.winner.name}</div> : reviewMode ? <button className="match-battle-button" onClick={() => onReview(match)}>Revisar luta</button> : (match.a.isUser || match.b.isUser) ? <button className="match-battle-button" onClick={() => onBattle(match)}>Batalhar</button> : null}</article>;
 }
-
-function EmptyPage({ text }) { return <div className="empty-page"><span>✦</span><p>{text}</p></div>; }
-
-function BottomNav({ page, setPage }) { return <nav className="bottom-nav"><button className={page === "team" ? "active" : ""} onClick={() => setPage("team")}><span>◈</span><small>Team Builder</small></button><button className={page === "moves" ? "active" : ""} onClick={() => setPage("moves")}><span>✦</span><small>Movimentos</small></button><button className={page === "battles" ? "active" : ""} onClick={() => setPage("battles")}><span>⚔</span><small>Batalhas</small></button></nav>; }
 
 function TeamSlot({ pokemon, onClick }) {
   return (
